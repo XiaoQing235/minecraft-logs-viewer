@@ -112,6 +112,7 @@ pub struct IndexedLog {
     pub path: PathBuf,
     pub backing: Arc<CacheFile>,
     pub encoding: EncodingInfo,
+    pub live: bool,
     pub index: RwLock<Index>,
 }
 
@@ -198,14 +199,19 @@ impl IndexedLog {
     }
     pub fn full_text(&self) -> io::Result<String> {
         let index = self.index.read().unwrap();
-        if !index.complete {
+        if !index.complete && !self.live {
             return Err(io::Error::other("请等待日志读取完成"));
         }
         if index.bytes > EDIT_LIMIT {
             return Err(io::Error::other("全文超过 20 MiB，请选择片段创建副本"));
         }
+        let bytes = index.bytes;
         drop(index);
-        std::fs::read_to_string(&self.path)
+        let mut text = String::new();
+        File::open(&self.path)?
+            .take(bytes)
+            .read_to_string(&mut text)?;
+        Ok(text)
     }
 }
 
@@ -240,6 +246,7 @@ pub fn decode(
         path: backing.path().to_owned(),
         backing: backing.clone(),
         encoding: info.clone(),
+        live: false,
         index: RwLock::new(Index {
             checkpoints: vec![0],
             ..Index::default()
@@ -254,6 +261,7 @@ pub fn decode(
     let mut input_bytes = sample[info.skip..].to_vec();
     let mut output = String::with_capacity(SAMPLE_SIZE * 4);
     let mut offset = 0u64;
+    let mut line_start = 0u64;
     let mut complete_lines = 0usize;
     let mut previous = 0u8;
     let mut report_at = 512usize;
@@ -271,7 +279,11 @@ pub fn decode(
             index.errors |= errors;
             for byte in output.bytes() {
                 offset += 1;
+                if offset - line_start > MAX_LINE as u64 {
+                    return Err(io::Error::other("单行超过 32 MiB，已停止读取"));
+                }
                 if byte == b'\n' {
+                    line_start = offset;
                     complete_lines += 1;
                     if previous == b'\r' {
                         index.crlf += 1;

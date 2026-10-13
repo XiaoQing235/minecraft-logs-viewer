@@ -8,10 +8,12 @@ license = "MIT"
 
 [dependencies]
 fltk = { version = "=1.5.23", features = ["no-images"] }
-compress-tools = { version = "=0.16.1", default-features = false }
+compress-tools = { version = "=0.16.1", default-features = false, features = ["static", "static_z", "static_lzma", "static_bz2"] }
 regex = "=1.13.1"
 encoding_rs = "=0.8.35"
 chardetng = "=0.1.17"
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = "=1.0.150"
 
 [profile.release]
 opt-level = "s"

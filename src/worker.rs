@@ -24,6 +24,7 @@ pub enum Event {
     Failed(u64, String),
     Hits(u64, Vec<Hit>),
     Searched(u64, Report),
+    Waiting(u64),
     Saved(u64, usize, PathBuf, TargetStamp, String, String, Output),
 }
 
@@ -130,7 +131,7 @@ fn send(sender: &SyncSender<Event>, mut event: Event, cancel: &AtomicBool) {
 
 pub struct Workers {
     scan: Lane<(PathBuf, bool)>,
-    read: Lane<(LogSource, Option<String>)>,
+    read: Lane<(LogSource, Option<String>, bool)>,
     search: Lane<(Vec<LogSource>, Options)>,
     save: Lane<SaveRequest>,
     pub events: Receiver<Event>,
@@ -159,7 +160,25 @@ impl Workers {
         });
         let read_cache = cache.clone();
         let read_sender = sender.clone();
-        let read = Lane::new(move |task: Task<(LogSource, Option<String>)>| {
+        let read = Lane::new(move |task: Task<(LogSource, Option<String>, bool)>| {
+            if task.command.2 {
+                let result = crate::tail::follow(
+                    task.command.0,
+                    task.command.1.as_deref(),
+                    &read_cache,
+                    &task.cancel,
+                    |log| send(&read_sender, Event::Loaded(task.id, log), &task.cancel),
+                    || send(&read_sender, Event::Waiting(task.id), &task.cancel),
+                );
+                if let Err(error) = result {
+                    send(
+                        &read_sender,
+                        Event::Failed(task.id, error.to_string()),
+                        &task.cancel,
+                    );
+                }
+                return;
+            }
             let result = text::open(
                 task.command.0,
                 task.command.1.as_deref(),
@@ -253,11 +272,18 @@ impl Workers {
     }
     pub fn open(&mut self, source: LogSource, encoding: Option<String>) -> u64 {
         let id = self.next();
-        self.read.replace(id, (source, encoding));
+        self.read.replace(id, (source, encoding, false));
         id
     }
     pub fn cancel(&self) {
         self.scan.cancel();
+        self.read.cancel();
+        self.search.cancel();
+    }
+    pub fn cancel_search(&self) {
+        self.search.cancel();
+    }
+    pub fn cancel_view(&self) {
         self.read.cancel();
         self.search.cancel();
     }
@@ -269,6 +295,11 @@ impl Workers {
     pub fn save(&mut self, request: SaveRequest) -> u64 {
         let id = self.next();
         self.save.replace(id, request);
+        id
+    }
+    pub fn follow(&mut self, source: LogSource, encoding: Option<String>) -> u64 {
+        let id = self.next();
+        self.read.replace(id, (source, encoding, true));
         id
     }
 }

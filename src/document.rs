@@ -18,7 +18,7 @@ pub enum FinalNewline {
     Remove,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Output {
     pub encoding: &'static Encoding,
     pub bom: bool,
@@ -41,6 +41,11 @@ pub struct Document {
 
 impl Document {
     pub fn from_log(log: &IndexedLog, text: String) -> io::Result<Self> {
+        if text.contains('\0') {
+            return Err(io::Error::other(
+                "内容包含 NUL 字符，编辑器无法完整表示。请检查所选编码或导出原文",
+            ));
+        }
         if text.len() as u64 > EDIT_LIMIT {
             return Err(io::Error::other("副本超过 20 MiB，请缩小范围"));
         }

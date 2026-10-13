@@ -5,6 +5,8 @@ pub mod format;
 pub mod platform;
 pub mod save;
 pub mod search;
+pub mod settings;
 pub mod source;
+pub mod tail;
 pub mod text;
 pub mod worker;

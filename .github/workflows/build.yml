@@ -1,0 +1,84 @@
+name: Native desktop
+on:
+  push:
+    branches: [dev, main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2022
+            target: windows-x64
+          - os: macos-14
+            target: macos-arm64
+          - os: macos-15-intel
+            target: macos-x64
+          - os: ubuntu-22.04
+            target: linux-x64
+    runs-on: ${{ matrix.os }}
+    env:
+      CARGO_NET_OFFLINE: 'false'
+      CARGO_TERM_COLOR: always
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+      - name: Install native build tools
+        run: |
+          if ($IsLinux) {
+            sudo apt-get update
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
+            sudo apt-get install -y ninja-build pkg-config libx11-dev libxext-dev libxft-dev libxinerama-dev libxcursor-dev libxrender-dev libxfixes-dev libpango1.0-dev libcairo2-dev libglu1-mesa-dev xvfb fonts-noto-cjk
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          } elseif ($IsMacOS) {
+            brew install ninja pkg-config
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          }
+          go install github.com/betterleaks/betterleaks@v1.8.1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          (Join-Path (go env GOPATH) 'bin') >> $env:GITHUB_PATH
+      - name: Prepare and check
+        run: ./scripts/build.ps1 -Prepare -Action clippy -Release
+      - name: Formatting
+        run: ./scripts/build.ps1 -Action fmt
+      - name: Behavior tests
+        run: ./scripts/build.ps1 -Action test -Release
+      - name: Release build
+        run: ./scripts/build.ps1 -Release
+      - name: Native window smoke
+        if: runner.os != 'macOS'
+        run: |
+          if ($IsLinux) {
+            xvfb-run -a ./target/release/minecraft-logs-viewer ./tests/fixtures --smoke --smoke-query ABCDEF --smoke-copy
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          } else {
+            $process = Start-Process ./target/release/minecraft-logs-viewer.exe -ArgumentList './tests/fixtures', '--smoke', '--smoke-query', 'ABCDEF', '--smoke-copy' -WindowStyle Hidden -PassThru -Wait
+            if ($process.ExitCode) { exit $process.ExitCode }
+          }
+      - name: Dependency report
+        run: |
+          if ($IsLinux) {
+            ldd ./target/release/minecraft-logs-viewer
+          } elseif ($IsMacOS) {
+            otool -L ./target/release/minecraft-logs-viewer
+          }
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Package and enforce size
+        run: ./scripts/package.ps1 -Platform ${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: minecraft-logs-viewer-${{ matrix.target }}
+          path: dist/*.zip
+          if-no-files-found: error

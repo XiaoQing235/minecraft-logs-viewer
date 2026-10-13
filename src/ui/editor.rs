@@ -188,6 +188,8 @@ impl EditorUi {
         }
     }
     pub fn is_modified(&self) -> bool {
-        self.dirty.get() && self.buffer.text() != self.document.borrow().base
+        let document = self.document.borrow();
+        (self.dirty.get() && self.buffer.text() != document.base)
+            || self.output() != document.output
     }
 }

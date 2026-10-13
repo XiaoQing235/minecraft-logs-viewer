@@ -197,6 +197,16 @@ pub fn build() -> (TableRow, Rc<RefCell<View>>) {
                         draw::draw_rectf(position, y + 1, width, h - 2);
                     }
                     let color = span.style.color.map(minecraft_color).unwrap_or(theme::TEXT);
+                    if span.style.color.is_some() && contrast(color, background) < 4.5 {
+                        let backdrop =
+                            if contrast(color, Color::White) > contrast(color, Color::Black) {
+                                Color::White
+                            } else {
+                                Color::Black
+                            };
+                        draw::set_draw_color(backdrop);
+                        draw::draw_rectf(position, y + 2, width, h - 4);
+                    }
                     draw::set_draw_color(color);
                     draw::draw_text(&shown, position, y + h - 7);
                     if span.style.underline {
@@ -215,6 +225,9 @@ pub fn build() -> (TableRow, Rc<RefCell<View>>) {
 }
 
 fn minecraft_color(index: u8) -> Color {
+    if index == 0 {
+        return Color::Black;
+    }
     const COLORS: [(u8, u8, u8); 16] = [
         (0, 0, 0),
         (0, 0, 170),
@@ -235,6 +248,24 @@ fn minecraft_color(index: u8) -> Color {
     ];
     let (r, g, b) = COLORS[index as usize];
     Color::from_rgb(r, g, b)
+}
+
+fn contrast(a: Color, b: Color) -> f64 {
+    fn luminance(color: Color) -> f64 {
+        let (r, g, b) = color.to_rgb();
+        let channel = |byte: u8| {
+            let value = byte as f64 / 255.0;
+            if value <= 0.04045 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
+    }
+    let a = luminance(a);
+    let b = luminance(b);
+    (a.max(b) + 0.05) / (a.min(b) + 0.05)
 }
 
 pub fn truncate(text: &str, limit: usize) -> &str {

@@ -6,23 +6,23 @@ use fltk::{
     enums::{Color, Font, FrameType},
 };
 
-pub const BACKGROUND: Color = Color::from_hex(0x10141b);
-pub const SURFACE: Color = Color::from_hex(0x171d27);
-pub const CONTROL: Color = Color::from_hex(0x202938);
-pub const HOVER: Color = Color::from_hex(0x2c3a4e);
-pub const RULE: Color = Color::from_hex(0x354254);
-pub const TEXT: Color = Color::from_hex(0xe7edf7);
-pub const MUTED: Color = Color::from_hex(0x9aacc4);
-pub const DISABLED: Color = Color::from_hex(0x64738a);
-pub const ACCENT: Color = Color::from_hex(0x2f66d1);
-pub const ACCENT_HOVER: Color = Color::from_hex(0x366ed5);
-pub const ACCENT_INK: Color = Color::from_hex(0xffffff);
-pub const FOCUS: Color = Color::from_hex(0x91bdff);
-pub const SELECTION: Color = Color::from_hex(0x263d60);
-pub const SUCCESS: Color = Color::from_hex(0x78dba9);
-pub const WARNING: Color = Color::from_hex(0xffcd78);
-pub const ERROR: Color = Color::from_hex(0xff8e96);
-pub const MATCH: Color = Color::from_hex(0x665125);
+pub const BACKGROUND: Color = Color::from_rgbi(200);
+pub const SURFACE: Color = Color::from_rgbi(201);
+pub const CONTROL: Color = Color::from_rgbi(202);
+pub const HOVER: Color = Color::from_rgbi(203);
+pub const RULE: Color = Color::from_rgbi(204);
+pub const TEXT: Color = Color::from_rgbi(205);
+pub const MUTED: Color = Color::from_rgbi(206);
+pub const DISABLED: Color = Color::from_rgbi(207);
+pub const ACCENT: Color = Color::from_rgbi(208);
+pub const ACCENT_HOVER: Color = Color::from_rgbi(209);
+pub const ACCENT_INK: Color = Color::from_rgbi(210);
+pub const FOCUS: Color = Color::from_rgbi(211);
+pub const SELECTION: Color = Color::from_rgbi(212);
+pub const SUCCESS: Color = Color::from_rgbi(213);
+pub const WARNING: Color = Color::from_rgbi(214);
+pub const ERROR: Color = Color::from_rgbi(215);
+pub const MATCH: Color = Color::from_rgbi(216);
 pub const UI_FONT: Font = Font::Helvetica;
 pub const HEADING_FONT: Font = Font::HelveticaBold;
 pub const MONO_FONT: Font = Font::Courier;
@@ -45,7 +45,19 @@ fn focused_box(x: i32, y: i32, w: i32, h: i32, color: Color) {
     draw::draw_rounded_rect(x, y, w - 1, h - 1, RADIUS);
 }
 
-pub fn apply() {
+pub fn apply(light: bool) {
+    const DARK: [u32; 17] = [
+        0x10141b, 0x171d27, 0x202938, 0x2c3a4e, 0x354254, 0xe7edf7, 0x9aacc4, 0x64738a, 0x2f66d1,
+        0x366ed5, 0xffffff, 0x91bdff, 0x263d60, 0x78dba9, 0xffcd78, 0xff8e96, 0x665125,
+    ];
+    const LIGHT: [u32; 17] = [
+        0xf4f6fa, 0xffffff, 0xebeff5, 0xe0e7f0, 0xb7c3d3, 0x172132, 0x52647c, 0x8995a7, 0x2f66d1,
+        0x366ed5, 0xffffff, 0x2356b7, 0xd9e6fd, 0x187749, 0x8e5a00, 0xb31c30, 0xffe6ad,
+    ];
+    for (index, hex) in if light { LIGHT } else { DARK }.iter().enumerate() {
+        let (r, g, b) = Color::from_hex(*hex).to_rgb();
+        app::set_color(Color::from_rgbi(200 + index as u32), r, g, b);
+    }
     app::set_scheme(app::Scheme::Base);
     let (r, g, b) = BACKGROUND.to_rgb();
     app::background(r, g, b);

@@ -83,6 +83,45 @@ fn archive_scope_duplicates_and_inner_gzip() {
 }
 
 #[test]
+fn rar4_and_rar5_stored_compressed_and_solid_decoders() {
+    use minecraft_logs_viewer::source::Member;
+    let cache = Cache::new().unwrap();
+    let cancel = AtomicBool::new(false);
+    let bytes = |archive_name: &str, name: &str, ordinal, size| {
+        let mut input = source(fixture(archive_name));
+        input.member = Some(Member {
+            name: name.into(),
+            ordinal,
+            size,
+        });
+        let prepared = archive::prepare(&input, &cache, &cancel).unwrap();
+        fs::read(&prepared.path).unwrap()
+    };
+    assert_eq!(
+        bytes("rar4.rar", "test.txt", 0, 20),
+        b"test text document\r\n"
+    );
+    assert_eq!(
+        bytes("rar5-stored.rar", "helloworld.txt", 0, 28),
+        b"hello libarchive test suite!\n"
+    );
+    let expected = |magic: i32, size| -> Vec<u8> {
+        (1..=size / 4)
+            .flat_map(|k| (k * k - 3 * k + 1 + magic).max(0).to_le_bytes())
+            .collect()
+    };
+    assert_eq!(
+        bytes("rar5-compressed.rar", "test.bin", 0, 1200),
+        expected(0, 1200)
+    );
+    // The final member requires decoding the preceding solid dictionary.
+    assert_eq!(
+        bytes("rar5-solid.rar", "test4.bin", 3, 4096),
+        expected(4, 4096)
+    );
+}
+
+#[test]
 fn sparse_index_across_decoding_chunks_and_final_line() {
     let cache = Cache::new().unwrap();
     let cancel = AtomicBool::new(false);

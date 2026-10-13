@@ -14,6 +14,7 @@ use minecraft_logs_viewer::{
     document::Document,
     save,
     search::Completion,
+    settings::{Bookmark, Settings},
     source::LogSource,
     text::ENCODINGS,
     worker::{Event, SaveRequest, Workers},
@@ -43,6 +44,15 @@ enum Action {
     Replace(usize),
     Preview(usize),
     CloseWindow,
+    Follow,
+    Bookmark,
+    OpenBookmark,
+    Preferences,
+    Font(i32),
+    Theme,
+    ClearCache,
+    Sort,
+    Inspect,
 }
 
 fn create_editor(document: Document, index: usize, commands: app::Sender<Action>) -> EditorUi {
@@ -83,11 +93,78 @@ fn browse_directory() -> Option<PathBuf> {
     }
 }
 
+fn date(source: &LogSource) -> Option<String> {
+    use std::sync::OnceLock;
+    static DATE: OnceLock<regex::Regex> = OnceLock::new();
+    let name = source
+        .member
+        .as_ref()
+        .map(|member| member.name.clone())
+        .unwrap_or_else(|| {
+            source
+                .path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned()
+        });
+    let captures = DATE
+        .get_or_init(|| regex::Regex::new(r"\d{4}-\d{2}-\d{2}").unwrap())
+        .find(name.rsplit(['/', '\\']).next().unwrap_or(&name))?;
+    let date = captures.as_str();
+    let month: usize = date[5..7].parse().ok()?;
+    let day: usize = date[8..10].parse().ok()?;
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    Some(date.into())
+}
+
+fn add_source(tree: &mut fltk::tree::Tree, source: &LogSource, index: usize) -> Option<TreeItem> {
+    let display = source
+        .member
+        .as_ref()
+        .map(|member| {
+            format!(
+                "{} [#{}]",
+                member.name.replace('/', "∕"),
+                member.ordinal + 1
+            )
+        })
+        .unwrap_or_else(|| source.relative.replace(['/', '\\'], "∕"));
+    let branch = if source.member.is_some() {
+        format!("归档/{}", source.relative.replace(['/', '\\'], "∕"))
+    } else {
+        "普通日志".into()
+    };
+    let mut item = tree.add(&format!("{branch}/[{index}] {display}"));
+    if let Some(item) = &mut item {
+        item.set_label(&display);
+    }
+    if let Some(mut parent) = tree.find_item(&branch) {
+        parent.set_label_fgcolor(theme::MUTED);
+        parent.set_label_size(theme::SMALL);
+    }
+    item
+}
+
 pub fn run() -> std::io::Result<()> {
     let application = app::App::default();
-    theme::apply();
+    let smoke = std::env::args().any(|arg| arg == "--smoke");
+    let mut settings = if smoke {
+        Settings::default()
+    } else {
+        Settings::load()?
+    };
+    theme::apply(settings.light);
     let (commands, actions) = app::channel::<Action>();
-    let mut window = Window::new(80, 80, 1280, 820, "Minecraft Logs Viewer");
+    let mut window = Window::new(
+        80,
+        80,
+        settings.window[0],
+        settings.window[1],
+        "Minecraft Logs Viewer",
+    );
     window.set_color(theme::BACKGROUND);
     window.size_range(1040, 620, 0, 0);
     let mut layout = Flex::default_fill().column();
@@ -126,13 +203,24 @@ pub fn run() -> std::io::Result<()> {
     sources_count.set_color(theme::SURFACE);
     sidebar.fixed(&sources_count, 22);
     let recursive = controls::toggle("包含子目录");
+    recursive.set_checked(settings.recursive);
     sidebar.fixed(&recursive, 30);
+    let mut sort = controls::choice();
+    sort.add_choice("名称排序|日期排序");
+    sort.set_value(0);
+    sidebar.fixed(&sort, 30);
     let mut tree = controls::source_tree();
     tree.set_show_root(false);
     tree.set_select_mode(TreeSelect::Multi);
     let mut scope_hint = controls::label("归档根目录及 logs/ 中的日志", false);
     scope_hint.set_color(theme::SURFACE);
     sidebar.fixed(&scope_hint, 24);
+    let mut side_actions = Flex::default().row();
+    side_actions.set_pad(theme::SPACE);
+    let mut bookmark_open = controls::button("书签", false);
+    let mut preferences = controls::button("设置", false);
+    side_actions.end();
+    sidebar.fixed(&side_actions, 32);
     sidebar.end();
     let mut tabs = Tabs::default();
     tabs.set_color(theme::SURFACE);
@@ -153,10 +241,13 @@ pub fn run() -> std::io::Result<()> {
     let mut source_metrics = controls::label("", false);
     source_metrics.set_color(theme::SURFACE);
     source_metrics.set_align(Align::Right | Align::Inside);
+    let mut follow = controls::toggle("跟随");
+    follow.deactivate();
     let mut edit_full = controls::button("编辑副本", false);
     let mut edit_fragment = controls::button("片段副本", false);
     heading.end();
     heading.fixed(&source_metrics, 230);
+    heading.fixed(&follow, 60);
     heading.fixed(&edit_full, 104);
     heading.fixed(&edit_fragment, 104);
     heading.set_pad(theme::SPACE);
@@ -196,6 +287,8 @@ pub fn run() -> std::io::Result<()> {
     let _ = spacer;
     log_layout.fixed(&tools, 34);
     let (mut table, view) = viewer::build();
+    view.borrow_mut().font_size = settings.font_size;
+    table.set_row_height_all(settings.font_size + 14);
     log_layout.end();
     let mut log_resize = log_layout.clone();
     log_tab.resize_callback(move |_, x, y, w, h| {
@@ -226,6 +319,44 @@ pub fn run() -> std::io::Result<()> {
         error_resize.resize(x, y, w, h);
     });
     errors_tab.end();
+    let mut preferences_tab = Group::default().with_label("设置");
+    preferences_tab.set_color(theme::SURFACE);
+    preferences_tab.set_label_color(theme::TEXT);
+    preferences_tab.set_label_font(theme::UI_FONT);
+    let mut preferences_layout = Flex::default_fill().column();
+    preferences_layout.set_margin(20);
+    preferences_layout.set_pad(12);
+    let mut preferences_heading = controls::label("阅读与本地数据", true);
+    preferences_heading.set_color(theme::SURFACE);
+    preferences_layout.fixed(&preferences_heading, 40);
+    let mut pref_row = Flex::default().row();
+    pref_row.set_pad(theme::SPACE);
+    let mut font_minus = controls::button("字体 −", false);
+    let mut font_plus = controls::button("字体 +", false);
+    let mut light = controls::toggle("浅色主题");
+    light.set_checked(settings.light);
+    let mut bookmark = controls::button("添加当前行书签", false);
+    let mut clear_cache = controls::button("清理查看缓存", false);
+    pref_row.end();
+    pref_row.fixed(&font_minus, 90);
+    pref_row.fixed(&font_plus, 90);
+    pref_row.fixed(&light, 130);
+    pref_row.fixed(&bookmark, 150);
+    preferences_layout.fixed(&pref_row, 38);
+    let mut bookmarks = HoldBrowser::default();
+    bookmarks.set_frame(FrameType::FlatBox);
+    bookmarks.set_color(theme::SURFACE);
+    bookmarks.set_text_size(theme::FONT_SIZE);
+    for saved in &settings.bookmarks {
+        bookmarks.add(&saved.label);
+    }
+    let mut hint = controls::label("书签与阅读位置保存在本机；清理缓存可重新读取来源", false);
+    hint.set_color(theme::SURFACE);
+    preferences_layout.fixed(&hint, 32);
+    preferences_layout.end();
+    let mut pref_resize = preferences_layout.clone();
+    preferences_tab.resize_callback(move |_, x, y, w, h| pref_resize.resize(x, y, w, h));
+    preferences_tab.end();
     tabs.end();
     tabs.auto_layout();
     body.end();
@@ -247,6 +378,17 @@ pub fn run() -> std::io::Result<()> {
     edit_full.set_callback(move |_| commands.send(Action::CreateCopy(true)));
     edit_fragment.set_callback(move |_| commands.send(Action::CreateCopy(false)));
     window.set_callback(move |_| commands.send(Action::CloseWindow));
+    follow.set_callback(move |_| commands.send(Action::Follow));
+    bookmark.set_callback(move |_| commands.send(Action::Bookmark));
+    bookmarks.set_callback(move |_| commands.send(Action::OpenBookmark));
+    preferences.set_callback(move |_| commands.send(Action::Preferences));
+    bookmark_open.set_callback(move |_| commands.send(Action::Preferences));
+    font_minus.set_callback(move |_| commands.send(Action::Font(-1)));
+    font_plus.set_callback(move |_| commands.send(Action::Font(1)));
+    light.set_callback(move |_| commands.send(Action::Theme));
+    clear_cache.set_callback(move |_| commands.send(Action::ClearCache));
+    sort.set_callback(move |_| commands.send(Action::Sort));
+    table.set_callback(move |_| commands.send(Action::Inspect));
     search_ui
         .start
         .set_callback(move |_| commands.send(Action::Search));
@@ -284,6 +426,8 @@ pub fn run() -> std::io::Result<()> {
     let mut search_scan_failures = Vec::<String>::new();
     let mut encoding_overrides = std::collections::BTreeMap::<String, String>::new();
     let mut pending_jump = None::<(usize, std::ops::Range<usize>)>;
+    let mut pending_bookmark = None::<u64>;
+    let mut restored_position = false;
     let mut editors = Vec::<Option<EditorUi>>::new();
     let mut preview_input = None::<std::sync::Arc<minecraft_logs_viewer::cache::CacheFile>>;
     let mut protected_sources =
@@ -291,7 +435,6 @@ pub fn run() -> std::io::Result<()> {
     let mut saving = None::<(u64, usize)>;
     let mut close_after_save = None::<usize>;
     let mut close_window_after_save = false;
-    let smoke = std::env::args().any(|arg| arg == "--smoke");
     let mut arguments = std::env::args_os().skip(1);
     let mut initial = None;
     let mut screenshot = None;
@@ -312,6 +455,10 @@ pub fn run() -> std::io::Result<()> {
         } else if argument == "--smoke-save" {
             smoke_save = arguments.next().map(PathBuf::from);
             smoke_copy = true;
+        } else if argument == "--light" {
+            settings.light = true;
+            light.set_checked(true);
+            theme::apply(true);
         } else if argument == "--window-size" {
             if let Some(size) = arguments
                 .next()
@@ -329,11 +476,21 @@ pub fn run() -> std::io::Result<()> {
             initial = Some(PathBuf::from(argument));
         }
     }
+    if initial.is_none() && !smoke {
+        initial = settings
+            .recent
+            .first()
+            .filter(|path| path.is_dir())
+            .cloned();
+    }
     if let Some(path) = initial {
         directory.set_value(&path.to_string_lossy());
         root = Some(path.clone());
         scan_id = workers.scan(path, recursive.is_checked());
         scan_pending = true;
+        if let Some(path) = &root {
+            settings.visited(path.clone());
+        }
         cancel.activate();
     }
     window.show();
@@ -349,6 +506,9 @@ pub fn run() -> std::io::Result<()> {
         while let Some(action) = actions.recv() {
             match action {
                 Action::Open | Action::Refresh => {
+                    if let Some(log) = &view.borrow().log {
+                        settings.position(log.source.id(), table.row_position().max(0) as usize);
+                    }
                     let chosen = match action {
                         Action::Open => browse_directory(),
                         _ => root.clone(),
@@ -356,12 +516,17 @@ pub fn run() -> std::io::Result<()> {
                     if let Some(path) = chosen {
                         workers.cancel();
                         sources.clear();
+                        follow.set_checked(false);
+                        follow.deactivate();
                         preview_input = None;
                         encoding.activate();
                         scan_pending = true;
                         scan_failures.clear();
                         encoding_overrides.clear();
                         pending_jump = None;
+                        pending_bookmark = None;
+                        view.borrow_mut().focus = None;
+                        restored_position = false;
                         search_id = 0;
                         source_items.clear();
                         tree.clear();
@@ -378,6 +543,7 @@ pub fn run() -> std::io::Result<()> {
                         sources_count.set_label("正在发现日志…");
                         directory.set_value(&path.to_string_lossy());
                         root = Some(path.clone());
+                        settings.visited(path.clone());
                         scan_id = workers.scan(path, recursive.is_checked());
                         status.set_label("扫描中…");
                         status.set_label_color(theme::WARNING);
@@ -385,6 +551,9 @@ pub fn run() -> std::io::Result<()> {
                     }
                 }
                 Action::Selected | Action::Encoding => {
+                    if let Some(log) = &view.borrow().log {
+                        settings.position(log.source.id(), table.row_position().max(0) as usize);
+                    }
                     let selected = if matches!(action, Action::Encoding) {
                         active
                     } else {
@@ -395,9 +564,17 @@ pub fn run() -> std::io::Result<()> {
                         })
                     };
                     if let Some(index) = selected.filter(|index| *index < sources.len()) {
+                        restored_position = false;
+                        view.borrow_mut().focus = None;
+                        pending_bookmark = None;
+                        pending_jump = None;
                         preview_input = None;
                         encoding.activate();
                         if matches!(action, Action::Encoding) {
+                            workers.cancel_search();
+                            search_id = 0;
+                            search_ui.clear();
+                            search_ui.summary.set_label("编码已切换，请重新搜索");
                             let name = (encoding.value() > 0)
                                 .then(|| ENCODINGS[encoding.value() as usize].to_owned());
                             if let Some(name) = name {
@@ -416,6 +593,12 @@ pub fn run() -> std::io::Result<()> {
                             pending_jump = None;
                         }
                         active = Some(index);
+                        if sources[index].is_live() {
+                            follow.activate();
+                        } else {
+                            follow.set_checked(false);
+                            follow.deactivate();
+                        }
                         view.borrow_mut().log = None;
                         view.borrow_mut().rows.clear();
                         table.set_rows(0);
@@ -424,7 +607,20 @@ pub fn run() -> std::io::Result<()> {
                         source_metrics.set_label("读取中…");
                         let encoding_name = (encoding.value() > 0)
                             .then(|| ENCODINGS[encoding.value() as usize].to_owned());
-                        read_id = workers.open(sources[index].clone(), encoding_name);
+                        let mut source = sources[index].clone();
+                        match minecraft_logs_viewer::source::Revision::read(&source.path) {
+                            Ok(revision) => source.revision = revision,
+                            Err(error) => {
+                                status.set_label(&error.to_string());
+                                status.set_label_color(theme::ERROR);
+                                continue;
+                            }
+                        }
+                        read_id = if follow.is_checked() {
+                            workers.follow(source, encoding_name)
+                        } else {
+                            workers.open(source, encoding_name)
+                        };
                         status.set_label("读取与建立索引…");
                         status.set_label_color(theme::WARNING);
                         cancel.activate();
@@ -452,6 +648,7 @@ pub fn run() -> std::io::Result<()> {
                     }
                 }
                 Action::Cancel => {
+                    follow.set_checked(false);
                     workers.cancel();
                     status.set_label("任务已取消，当前内容可能不完整");
                     status.set_label_color(theme::WARNING);
@@ -780,6 +977,144 @@ pub fn run() -> std::io::Result<()> {
                         window.hide();
                     }
                 }
+                Action::Follow => {
+                    if let Some(log) = &view.borrow().log
+                        && log.source.is_live()
+                    {
+                        let mut source = log.source.clone();
+                        if let Ok(revision) =
+                            minecraft_logs_viewer::source::Revision::read(&source.path)
+                        {
+                            source.revision = revision;
+                        }
+                        let encoding = encoding_overrides.get(&source.id()).cloned();
+                        read_id = if follow.is_checked() {
+                            workers.follow(source, encoding)
+                        } else {
+                            workers.open(source, encoding)
+                        };
+                        status.set_label(if follow.is_checked() {
+                            "实时跟随 · 仅显示完整行"
+                        } else {
+                            "跟随已暂停，正在创建固定快照"
+                        });
+                    }
+                }
+                Action::Preferences => {
+                    let _ = tabs.set_value(&preferences_tab);
+                }
+                Action::Theme => {
+                    settings.light = light.is_checked();
+                    theme::apply(settings.light);
+                    window.redraw();
+                }
+                Action::Font(delta) => {
+                    settings.font_size = (settings.font_size + delta).clamp(10, 24);
+                    view.borrow_mut().font_size = settings.font_size;
+                    table.set_row_height_all(settings.font_size + 14);
+                    table.redraw();
+                    for editor in editors.iter_mut().flatten() {
+                        editor.editor.set_text_size(settings.font_size);
+                    }
+                }
+                Action::ClearCache => {
+                    workers.cancel_view();
+                    read_id = 0;
+                    search_id = 0;
+                    view.borrow_mut().log = None;
+                    view.borrow_mut().rows.clear();
+                    table.set_rows(0);
+                    search_ui.clear();
+                    preview_input = None;
+                    follow.set_checked(false);
+                    status.set_label("已释放查看内容与搜索结果，可重新打开来源");
+                }
+                Action::Bookmark => {
+                    let log = view.borrow().log.clone();
+                    if let Some(log) = log {
+                        let (first, _, _, _) = table.get_selection();
+                        let number = if first >= 0 {
+                            first as usize
+                        } else {
+                            table.row_position().max(0) as usize
+                        };
+                        if let Some(line) = log.read_range(number, 1)?.first() {
+                            if settings.bookmarks.len() >= 1000 {
+                                status.set_label("书签达到 1,000 条上限");
+                                continue;
+                            }
+                            let label = format!("{} · 第 {} 行", log.source.label(), number + 1);
+                            settings.bookmarks.push(Bookmark {
+                                source: log.source.id(),
+                                line: number,
+                                digest: minecraft_logs_viewer::settings::digest(&line.raw),
+                                label: label.clone(),
+                            });
+                            bookmarks.add(&label);
+                            status.set_label("已添加书签");
+                        }
+                    }
+                }
+                Action::OpenBookmark => {
+                    let selected = bookmarks.value();
+                    if selected > 0
+                        && let Some(saved) = settings.bookmarks.get((selected - 1) as usize)
+                    {
+                        if let Some(index) = sources
+                            .iter()
+                            .position(|source| source.id() == saved.source)
+                        {
+                            active = Some(index);
+                            read_id = workers.open(
+                                sources[index].clone(),
+                                encoding_overrides.get(&saved.source).cloned(),
+                            );
+                            pending_jump = Some((saved.line, 0..0));
+                            pending_bookmark = Some(saved.digest);
+                            let _ = tabs.set_value(&log_tab);
+                        } else {
+                            status.set_label("请先打开这条书签对应的目录");
+                        }
+                    }
+                }
+                Action::Sort => {
+                    let mut order: Vec<_> = (0..sources.len()).collect();
+                    order.sort_by_key(|index| {
+                        if sort.value() == 1 {
+                            format!(
+                                "{}:{}",
+                                date(&sources[*index]).unwrap_or_else(|| "9999-99-99".into()),
+                                sources[*index].label()
+                            )
+                        } else {
+                            sources[*index].label().to_lowercase()
+                        }
+                    });
+                    tree.clear();
+                    source_items = vec![None; sources.len()];
+                    for index in order {
+                        source_items[index] = add_source(&mut tree, &sources[index], index);
+                    }
+                }
+                Action::Inspect => {
+                    let row = table.callback_row();
+                    if row >= 0
+                        && let Some(log) = &view.borrow().log
+                        && let Some(line) = log.read_range(row as usize, 1)?.first()
+                    {
+                        let record = minecraft_logs_viewer::text::parse_record(
+                            &minecraft_logs_viewer::format::StyledLine::parse(&line.raw).text,
+                        );
+                        status.set_label(&format!(
+                            "第 {} 行 · 时间 {} · 级别 {} · 线程 {} · Logger {}",
+                            row + 1,
+                            record.time.as_deref().unwrap_or("未知"),
+                            record.level.as_deref().unwrap_or("未知"),
+                            record.thread.as_deref().unwrap_or("未知"),
+                            record.logger.as_deref().unwrap_or("未知")
+                        ));
+                    }
+                }
             }
         }
         for _ in 0..128 {
@@ -861,6 +1196,27 @@ pub fn run() -> std::io::Result<()> {
                         view.borrow_mut().focus = Some((*line, range.clone()));
                         pending_jump = None;
                     }
+                    let bookmark_focus = view.borrow().focus.clone();
+                    let mut bookmark_changed = false;
+                    if pending_jump.is_none()
+                        && let Some((line, _)) = &bookmark_focus
+                        && let Some(digest) = pending_bookmark.take()
+                        && log.read_range(*line, 1)?.first().is_none_or(|row| {
+                            minecraft_logs_viewer::settings::digest(&row.raw) != digest
+                        })
+                    {
+                        bookmark_changed = true;
+                        view.borrow_mut().focus = None;
+                    }
+                    if !restored_position
+                        && view.borrow().focus.is_none()
+                        && pending_jump.is_none()
+                        && let Some(line) = settings.positions.get(&log.source.id())
+                        && *line < index.lines
+                    {
+                        table.set_row_position(*line as i32);
+                        restored_position = true;
+                    }
                     let title = if preview_input
                         .as_ref()
                         .is_some_and(|owner| owner.path() == log.source.path)
@@ -887,12 +1243,36 @@ pub fn run() -> std::io::Result<()> {
                         log.encoding.encoding.name(),
                         index.lines
                     ));
+                    source_metrics.set_tooltip(&format!(
+                        "{} · {} · {} · {}",
+                        log.encoding.basis,
+                        if log.encoding.bom {
+                            "有 BOM"
+                        } else {
+                            "无 BOM"
+                        },
+                        if index.crlf > 0 && index.lf > 0 {
+                            "混合换行"
+                        } else if index.crlf > 0 {
+                            "CRLF"
+                        } else {
+                            "LF"
+                        },
+                        if index.errors {
+                            "存在解码错误"
+                        } else {
+                            "尚未发现解码错误"
+                        }
+                    ));
                     source_metrics.set_label_color(if index.errors {
                         theme::ERROR
                     } else {
                         theme::MUTED
                     });
                     copy.activate();
+                    if log.source.is_live() {
+                        follow.activate();
+                    }
                     edit_full.activate();
                     edit_fragment.activate();
                     go.activate();
@@ -904,7 +1284,9 @@ pub fn run() -> std::io::Result<()> {
                         log.source.label(),
                         log.encoding.encoding.name(),
                         index.lines,
-                        if index.complete {
+                        if log.live {
+                            "（实时跟随）"
+                        } else if index.complete {
                             ""
                         } else {
                             "（索引中）"
@@ -923,6 +1305,18 @@ pub fn run() -> std::io::Result<()> {
                     } else {
                         theme::MUTED
                     });
+                    if bookmark_changed {
+                        status.set_label("来源内容已变化，书签定位需要重新确认");
+                        status.set_label_color(theme::WARNING);
+                    }
+                    if log.live
+                        && let Ok(path) = log.source.path.canonicalize()
+                        && !protected_sources.iter().any(|(old, identity)| {
+                            *old == path && *identity == log.source.revision.identity
+                        })
+                    {
+                        protected_sources.push((path, log.source.revision.identity.clone()));
+                    }
                     if smoke && smoke_copy && !smoke_started && index.complete {
                         smoke_started = true;
                         commands.send(Action::CreateCopy(true));
@@ -945,6 +1339,10 @@ pub fn run() -> std::io::Result<()> {
                     table.set_rows(0);
                 }
                 Event::Hits(id, hits) if id == search_id => search_ui.add(hits),
+                Event::Waiting(id) if id == read_id => {
+                    status.set_label("等待新的 latest.log · 可取消跟随");
+                    status.set_label_color(theme::WARNING);
+                }
                 Event::Searched(id, mut report) if id == search_id => {
                     report.failures.extend(search_scan_failures.clone());
                     if report.completion == Completion::Complete && !report.failures.is_empty() {
@@ -1062,5 +1460,13 @@ pub fn run() -> std::io::Result<()> {
         }
     }
     workers.cancel();
+    if !smoke {
+        if let Some(log) = &view.borrow().log {
+            settings.position(log.source.id(), table.row_position().max(0) as usize);
+        }
+        settings.window = [window.w(), window.h()];
+        settings.recursive = recursive.is_checked();
+        settings.store()?;
+    }
     Ok(())
 }
