@@ -5,3 +5,5 @@
 测试不使用个人 Minecraft 日志。`.log.gz` 成员与 ZIP 根目录、直接 `logs/` 成员分别验证；更深目录、路径越界和符号链接必须被忽略。
 
 LZMA 与 LZMA2 的 7z 样本由同一脚本调用 7-Zip 生成，包含相同人工日志。
+
+RAR4、RAR5 Stored / compressed / solid 样本来自 libarchive 3.8.9 的公开测试样本，保留原有成员名，用于单独验证实际解码路径。来源和许可见 [RAR-NOTICES.md](RAR-NOTICES.md)。归档日志成员范围由其余样本与路径单元测试验证。

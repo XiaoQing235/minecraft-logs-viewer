@@ -61,10 +61,14 @@ jobs:
         if: runner.os != 'macOS'
         run: |
           if ($IsLinux) {
-            xvfb-run -a ./target/release/minecraft-logs-viewer ./tests/fixtures --smoke --smoke-query ABCDEF --smoke-copy
+            xvfb-run -a ./target/release/minecraft-logs-viewer ./tests/fixtures --smoke --smoke-query ABCDEF
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
+            xvfb-run -a ./target/release/minecraft-logs-viewer ./tests/fixtures --smoke --smoke-copy
             if ($LASTEXITCODE) { exit $LASTEXITCODE }
           } else {
-            $process = Start-Process ./target/release/minecraft-logs-viewer.exe -ArgumentList './tests/fixtures', '--smoke', '--smoke-query', 'ABCDEF', '--smoke-copy' -WindowStyle Hidden -PassThru -Wait
+            $process = Start-Process ./target/release/minecraft-logs-viewer.exe -ArgumentList './tests/fixtures', '--smoke', '--smoke-query', 'ABCDEF' -WindowStyle Hidden -PassThru -Wait
+            if ($process.ExitCode) { exit $process.ExitCode }
+            $process = Start-Process ./target/release/minecraft-logs-viewer.exe -ArgumentList './tests/fixtures', '--smoke', '--smoke-copy' -WindowStyle Hidden -PassThru -Wait
             if ($process.ExitCode) { exit $process.ExitCode }
           }
       - name: Dependency report
