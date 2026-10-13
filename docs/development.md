@@ -26,7 +26,7 @@ Windows 的 libarchive、zlib、liblzma 和 bzip2 使用静态链接，MSVC 运�
 
 使用 `./scripts/package.ps1 -Platform windows-x64`，其他可选值为 `macos-arm64`、`macos-x64`、`linux-x64`。脚本从当前平台的 Release 产物组装 EXE、二进制或 APP，收集依赖许可，分别检查应用本体和 ZIP 小于 15,000,000 字节。输出 manifest 记录源提交、工作树是否有修改、字节数和 SHA-256。脚本拒绝覆盖已有 staging 和 ZIP；重复打包前可清理对应的 `dist` 生成物。
 
-项目尚未配置远程仓库，当前没有远端 CI 执行结果。平台矩阵标签参照 [GitHub hosted runners](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)。
+远程仓库为 [XiaoQing235/minecraft-logs-viewer](https://github.com/XiaoQing235/minecraft-logs-viewer)，开发分支为 `dev`。推送、PR 或手动操作会触发 CI，运行结果以仓库 Actions 记录为准。平台矩阵标签参照 [GitHub hosted runners](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)。
 
 ## 测量与窗口检查
 
@@ -46,4 +46,4 @@ minecraft-logs-viewer ./tests/fixtures --smoke --smoke-query ABCDEF --smoke-save
 
 ## Git 记录
 
-开发在 `dev` 分支进行，每个可验证阶段单独提交。提交前执行对应检查和 `git diff --check`；个人日志、运行配置、构建缓存与测试生成物不进入提交。未配置远程仓库时，提交保留在本地。
+开发在 `dev` 分支进行，每个可验证阶段单独提交。提交前执行对应检查和 `git diff --check`；个人日志、运行配置、构建缓存与测试生成物不进入提交。`origin` 指向上述 GitHub 仓库，提交推送到 `origin/dev`。

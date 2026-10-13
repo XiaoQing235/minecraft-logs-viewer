@@ -47,3 +47,7 @@ Windows 使用系统 DLL、UCRT 及 Visual C++ v14 x64 运行库；运行库版�
 ## 开发
 
 在 `dev` 分支按功能阶段提交。依赖锁定于 Cargo.lock 与 vcpkg baseline；首次构建使用 `./scripts/build.ps1 -Prepare -Release`，随后使用 `./scripts/package.ps1 -Platform windows-x64` 打包。每次成功构建后执行脱敏的 BetterLeaks 工作树扫描。
+
+## 许可证
+
+本项目使用 [MIT 许可证](LICENSE)。第三方依赖和测试样本遵循各自许可证，发行包附带对应许可文件。

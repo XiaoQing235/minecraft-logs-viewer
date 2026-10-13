@@ -23,7 +23,7 @@
 
 `dumpbin /dependents` 核对只包含 Windows 系统组件、UCRT 与 `VCRUNTIME140.dll`，不需要随包附带 FLTK 或归档 DLL。其他平台须用各自的 `ldd` / `otool -L` 输出确认运行条件；Windows 的测量不能推断其他目标体积。
 
-项目尚未配置远程仓库，CI 未执行；macOS 的签名 / 公证、各平台最低系统版本与原生输入验收均未完成。
+上述 2026-10-13 本机验收时尚未配置远程仓库，CI 未执行。2026-10-14 已创建 [GitHub 公开仓库](https://github.com/XiaoQing235/minecraft-logs-viewer)，配置 `origin` 并提交发布说明；后续 CI 结果以仓库 Actions 记录为准。macOS 的签名 / 公证、各平台最低系统版本与原生输入验收仍未完成。
 
 ## 功能证据
 
