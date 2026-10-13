@@ -55,7 +55,7 @@ elseif ($Release) { $cargoArgs += '--release' }
 if ($Action -eq 'clippy') { $cargoArgs += @('--all-targets', '--', '-D', 'warnings') }
 & cargo @cargoArgs
 if ($LASTEXITCODE) { exit $LASTEXITCODE }
-if ($Action -in @('build', 'test', 'run')) {
+if ($Action -ne 'fmt') {
     & ./scripts/check-secrets.ps1
     if ($LASTEXITCODE) { exit $LASTEXITCODE }
 }

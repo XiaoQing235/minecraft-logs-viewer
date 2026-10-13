@@ -1,5 +1,9 @@
 * text=auto eol=lf
 
+# Encoding and newline fixtures must retain their exact bytes.
+tests/fixtures/** -text -diff
+tests/fixtures/*.md text diff eol=lf
+
 *.bat text eol=crlf
 *.cmd text eol=crlf
 

@@ -1,0 +1,4 @@
+[12:34:56] [Server thread/INFO]: ¡ìaÄãºÃ¡ìlABC¡ìbDEF
+[12:35:00] [Server thread/ERROR] [minecraft/Main]: synthetic failure
+	at example.Test.run(Test.java:1)
+last line
