@@ -320,6 +320,7 @@ pub struct Record {
     pub thread: Option<String>,
     pub level: Option<String>,
     pub logger: Option<String>,
+    pub message_offset: usize,
     pub exception_continuation: bool,
 }
 
@@ -333,6 +334,7 @@ pub fn parse_record(raw: &str) -> Record {
             thread: Some(captures[2].into()),
             level: Some(captures[3].into()),
             logger: captures.get(4).map(|m| m.as_str().into()),
+            message_offset: captures.get(0).unwrap().end(),
             exception_continuation: false,
         },
         None => Record {
