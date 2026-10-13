@@ -1,0 +1,39 @@
+# Build and package outputs
+/target/
+/dist/
+/release/
+/build/
+*.pdb
+*.dSYM/
+
+# Local logs, archives and temporary data
+*.log
+*.log.gz
+*.gz
+*.tar
+*.tgz
+*.zip
+*.rar
+*.7z
+*.tmp
+*.bak
+/.cache/
+/runtime/
+
+# Controlled test fixtures
+!/tests/fixtures/**
+
+# Local environment and tool state
+/.env
+/.env.*
+/.codex/
+/.agents/
+/.codegraph/
+/.hallmark/
+/.idea/
+/.vscode/
+
+# Operating system metadata
+.DS_Store
+Thumbs.db
+Desktop.ini
