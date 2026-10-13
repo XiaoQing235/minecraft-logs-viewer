@@ -1,7 +1,10 @@
 pub mod archive;
 pub mod cache;
+pub mod document;
 pub mod format;
 pub mod platform;
+pub mod save;
+pub mod search;
 pub mod source;
 pub mod text;
 pub mod worker;

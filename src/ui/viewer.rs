@@ -167,7 +167,7 @@ pub fn build() -> (TableRow, Rc<RefCell<View>>) {
                     }
                     let start = span.visible.start.max(message);
                     let text = truncate(&formatted.text[start..span.visible.end], budget);
-                    let text = if position == x + 12 {
+                    let text = if position == x + 12 && record.message_offset > 0 {
                         text.trim_start()
                     } else {
                         text

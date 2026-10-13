@@ -1,5 +1,8 @@
 use crate::{
     cache::Cache,
+    document::{Document, Output},
+    save::{self, TargetStamp},
+    search::{self, Hit, Options, Report},
     source::{self, LogSource},
     text::{self, IndexedLog},
 };
@@ -19,6 +22,18 @@ pub enum Event {
     Scanned(u64, Vec<String>),
     Loaded(u64, Arc<IndexedLog>),
     Failed(u64, String),
+    Hits(u64, Vec<Hit>),
+    Searched(u64, Report),
+    Saved(u64, usize, PathBuf, TargetStamp, String, String, Output),
+}
+
+pub struct SaveRequest {
+    pub editor: usize,
+    pub document: Document,
+    pub text: String,
+    pub output: Output,
+    pub target: PathBuf,
+    pub expected: Option<TargetStamp>,
 }
 
 struct Task<C> {
@@ -116,6 +131,8 @@ fn send(sender: &SyncSender<Event>, mut event: Event, cancel: &AtomicBool) {
 pub struct Workers {
     scan: Lane<(PathBuf, bool)>,
     read: Lane<(LogSource, Option<String>)>,
+    search: Lane<(Vec<LogSource>, Options)>,
+    save: Lane<SaveRequest>,
     pub events: Receiver<Event>,
     pub cache: Cache,
     next: u64,
@@ -141,25 +158,85 @@ impl Workers {
             );
         });
         let read_cache = cache.clone();
+        let read_sender = sender.clone();
         let read = Lane::new(move |task: Task<(LogSource, Option<String>)>| {
             let result = text::open(
                 task.command.0,
                 task.command.1.as_deref(),
                 &read_cache,
                 &task.cancel,
-                |log| send(&sender, Event::Loaded(task.id, log), &task.cancel),
+                |log| send(&read_sender, Event::Loaded(task.id, log), &task.cancel),
             );
             if let Err(error) = result {
                 send(
-                    &sender,
+                    &read_sender,
                     Event::Failed(task.id, error.to_string()),
                     &task.cancel,
                 );
             }
         });
+        let search_cache = cache.clone();
+        let search_sender = sender.clone();
+        let search = Lane::new(move |task: Task<(Vec<LogSource>, Options)>| {
+            match search::run(
+                task.command.0,
+                task.command.1,
+                &search_cache,
+                &task.cancel,
+                |hits| send(&search_sender, Event::Hits(task.id, hits), &task.cancel),
+            ) {
+                Ok(report) => send(
+                    &search_sender,
+                    Event::Searched(task.id, report),
+                    &task.cancel,
+                ),
+                Err(error) => send(
+                    &search_sender,
+                    Event::Failed(task.id, error.to_string()),
+                    &task.cancel,
+                ),
+            }
+        });
+        let save = Lane::new(move |task: Task<SaveRequest>| {
+            let request = task.command;
+            let result = (|| -> std::io::Result<_> {
+                let bytes = request.document.encode(&request.text, &request.output)?;
+                let stamp = save::write_copy(
+                    &request.target,
+                    &bytes,
+                    &request.document.protected,
+                    &request.expected,
+                    &task.cancel,
+                )?;
+                let (original, _, _) = request.output.encoding.decode(&bytes);
+                Ok((stamp, original.into_owned()))
+            })();
+            match result {
+                Ok((stamp, original)) => send(
+                    &sender,
+                    Event::Saved(
+                        task.id,
+                        request.editor,
+                        request.target,
+                        stamp,
+                        request.text,
+                        original,
+                        request.output,
+                    ),
+                    &task.cancel,
+                ),
+                Err(error) => send(
+                    &sender,
+                    Event::Failed(task.id, error.to_string()),
+                    &task.cancel,
+                ),
+            }
+        });
         Ok(Self {
             scan,
             read,
+            search,
+            save,
             events,
             cache,
             next: 0,
@@ -182,5 +259,16 @@ impl Workers {
     pub fn cancel(&self) {
         self.scan.cancel();
         self.read.cancel();
+        self.search.cancel();
+    }
+    pub fn search(&mut self, sources: Vec<LogSource>, options: Options) -> u64 {
+        let id = self.next();
+        self.search.replace(id, (sources, options));
+        id
+    }
+    pub fn save(&mut self, request: SaveRequest) -> u64 {
+        let id = self.next();
+        self.save.replace(id, request);
+        id
     }
 }
