@@ -71,6 +71,9 @@ jobs:
             $process = Start-Process ./target/release/minecraft-logs-viewer.exe -ArgumentList './tests/fixtures', '--smoke', '--smoke-copy' -WindowStyle Hidden -PassThru -Wait
             if ($process.ExitCode) { exit $process.ExitCode }
           }
+      - name: Continuous scroll and startup input checks
+        if: runner.os == 'Windows'
+        run: ./scripts/smoke-scroll.ps1
       - name: Dependency report
         run: |
           if ($IsLinux) {

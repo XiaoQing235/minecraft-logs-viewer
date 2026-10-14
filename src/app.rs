@@ -3,7 +3,7 @@ use fltk::{
     app,
     browser::HoldBrowser,
     dialog::{self, FileDialogOptions, FileDialogType, NativeFileChooser},
-    enums::{Align, CallbackTrigger, FrameType},
+    enums::{Align, CallbackTrigger, Event as UiEvent, FrameType, Shortcut},
     frame::Frame,
     group::{Flex, Group, Tabs},
     prelude::*,
@@ -11,6 +11,7 @@ use fltk::{
     window::Window,
 };
 use minecraft_logs_viewer::{
+    browse::Anchor,
     document::Document,
     save,
     search::Completion,
@@ -53,6 +54,160 @@ enum Action {
     ClearCache,
     Sort,
     Inspect,
+    Scroll(i32),
+}
+
+#[derive(Default)]
+struct Browsing {
+    order: Vec<usize>,
+    read: u64,
+    adjacent: u64,
+    target: Option<(usize, bool)>,
+    pending: i64,
+    failed: std::collections::HashSet<usize>,
+    main: Option<usize>,
+}
+
+impl Browsing {
+    fn sync(&mut self, read: u64, workers: &Workers, view: &mut viewer::View) {
+        if self.read != read {
+            workers.cancel_adjacent();
+            self.read = read;
+            self.adjacent = 0;
+            self.target = None;
+            self.pending = 0;
+            self.failed.clear();
+            self.main = None;
+            if read != 0 {
+                view.window.files.clear();
+                view.rows.clear();
+            }
+        }
+    }
+    fn neighbor(&self, source: usize, backwards: bool) -> Option<usize> {
+        let position = self.order.iter().position(|index| *index == source)?;
+        if backwards {
+            self.order[..position]
+                .iter()
+                .rev()
+                .find(|index| !self.failed.contains(index))
+                .copied()
+        } else {
+            self.order[position + 1..]
+                .iter()
+                .find(|index| !self.failed.contains(index))
+                .copied()
+        }
+    }
+}
+
+fn source_order(sources: &[LogSource], by_date: bool) -> Vec<usize> {
+    let mut order: Vec<_> = (0..sources.len()).collect();
+    order.sort_by_key(|index| {
+        if by_date {
+            format!(
+                "{}:{}",
+                date(&sources[*index]).unwrap_or_else(|| "9999-99-99".into()),
+                sources[*index].label()
+            )
+        } else {
+            sources[*index].label().to_lowercase()
+        }
+    });
+    order
+}
+
+fn show_log(
+    log: &minecraft_logs_viewer::text::IndexedLog,
+    heading: &mut Frame,
+    metrics: &mut Frame,
+) {
+    let index = log.index.read().unwrap();
+    let title = log
+        .source
+        .member
+        .as_ref()
+        .map(|member| member.name.clone())
+        .unwrap_or_else(|| log.source.relative.clone());
+    heading.set_label(&title);
+    heading.set_tooltip(&log.source.label());
+    metrics.set_label(&format!(
+        "{}  ·  {}{} 行  ·  只读",
+        log.encoding.encoding.name(),
+        if index.complete || log.live {
+            ""
+        } else {
+            "已读 "
+        },
+        index.lines
+    ));
+    metrics.set_label_color(if index.errors {
+        theme::ERROR
+    } else {
+        theme::MUTED
+    });
+    metrics.set_tooltip(&format!(
+        "{} · {} · {} · {}",
+        log.encoding.basis,
+        if log.encoding.bom {
+            "有 BOM"
+        } else {
+            "无 BOM"
+        },
+        if index.crlf > 0 && index.lf > 0 {
+            "混合换行"
+        } else if index.crlf > 0 {
+            "CRLF"
+        } else {
+            "LF"
+        },
+        if index.errors {
+            "存在解码错误"
+        } else {
+            "尚未发现解码错误"
+        }
+    ));
+}
+
+fn publish_file(
+    table: &mut fltk::table::TableRow,
+    view: &mut viewer::View,
+    source: usize,
+    log: std::sync::Arc<minecraft_logs_viewer::text::IndexedLog>,
+    prepend: bool,
+) {
+    let anchor = viewer::anchor(table, view);
+    let offset = if table.rows() > 0 {
+        table.scrollbar().value()
+            - table.row_position().max(0) as f64 * table.row_height(0).max(1) as f64
+    } else {
+        0.0
+    };
+    let (first, _, last, _) = table.get_selection();
+    let selected = if first >= 0 {
+        view.window
+            .locate(first as usize)
+            .zip(view.window.locate(last as usize))
+    } else {
+        None
+    };
+    view.window.update(source, log, prepend);
+    view.rows.clear();
+    let empty = table.rows() == 0;
+    viewer::extent(table, view);
+    if empty {
+        table.set_row_height_all(view.font_size + 14);
+    }
+    let position = anchor
+        .and_then(|anchor| view.window.position(anchor))
+        .unwrap_or(0);
+    viewer::position(table, position, offset);
+    if let Some((first, last)) = selected
+        .and_then(|(first, last)| view.window.position(first).zip(view.window.position(last)))
+    {
+        table.set_selection(first as i32, 0, last as i32, 3);
+    }
+    table.redraw();
 }
 
 fn create_editor(document: Document, index: usize, commands: app::Sender<Action>) -> EditorUi {
@@ -389,6 +544,16 @@ pub fn run() -> std::io::Result<()> {
     clear_cache.set_callback(move |_| commands.send(Action::ClearCache));
     sort.set_callback(move |_| commands.send(Action::Sort));
     table.set_callback(move |_| commands.send(Action::Inspect));
+    table.handle(move |_, event| {
+        if event == UiEvent::MouseWheel
+            && app::event_dx_value() == 0
+            && !app::event_state().contains(Shortcut::Shift)
+        {
+            commands.send(Action::Scroll(app::event_dy_value().saturating_mul(3)));
+            return true;
+        }
+        false
+    });
     search_ui
         .start
         .set_callback(move |_| commands.send(Action::Search));
@@ -420,6 +585,7 @@ pub fn run() -> std::io::Result<()> {
     let mut scan_id = 0;
     let mut read_id = 0;
     let mut active = None::<usize>;
+    let mut browsing = Browsing::default();
     let mut search_id = 0;
     let mut scan_pending = false;
     let mut scan_failures = Vec::<String>::new();
@@ -476,6 +642,14 @@ pub fn run() -> std::io::Result<()> {
             initial = Some(PathBuf::from(argument));
         }
     }
+    if initial.is_none() {
+        initial = std::env::current_dir()
+            .ok()
+            .zip(std::env::current_exe().ok())
+            .and_then(|(working, executable)| {
+                minecraft_logs_viewer::startup::detect(&working, &executable)
+            });
+    }
     if initial.is_none() && !smoke {
         initial = settings
             .recent
@@ -507,7 +681,10 @@ pub fn run() -> std::io::Result<()> {
             match action {
                 Action::Open | Action::Refresh => {
                     if let Some(log) = &view.borrow().log {
-                        settings.position(log.source.id(), table.row_position().max(0) as usize);
+                        settings.position(
+                            log.source.id(),
+                            view.borrow().current_line(table.row_position()),
+                        );
                     }
                     let chosen = match action {
                         Action::Open => browse_directory(),
@@ -515,6 +692,7 @@ pub fn run() -> std::io::Result<()> {
                     };
                     if let Some(path) = chosen {
                         workers.cancel();
+                        browsing.order.clear();
                         sources.clear();
                         follow.set_checked(false);
                         follow.deactivate();
@@ -533,8 +711,7 @@ pub fn run() -> std::io::Result<()> {
                         errors.clear();
                         active = None;
                         read_id = 0;
-                        view.borrow_mut().log = None;
-                        view.borrow_mut().rows.clear();
+                        view.borrow_mut().clear();
                         table.set_rows(0);
                         copy.deactivate();
                         go.deactivate();
@@ -552,7 +729,10 @@ pub fn run() -> std::io::Result<()> {
                 }
                 Action::Selected | Action::Encoding => {
                     if let Some(log) = &view.borrow().log {
-                        settings.position(log.source.id(), table.row_position().max(0) as usize);
+                        settings.position(
+                            log.source.id(),
+                            view.borrow().current_line(table.row_position()),
+                        );
                     }
                     let selected = if matches!(action, Action::Encoding) {
                         active
@@ -599,8 +779,7 @@ pub fn run() -> std::io::Result<()> {
                             follow.set_checked(false);
                             follow.deactivate();
                         }
-                        view.borrow_mut().log = None;
-                        view.borrow_mut().rows.clear();
+                        view.borrow_mut().clear();
                         table.set_rows(0);
                         copy.deactivate();
                         go.deactivate();
@@ -629,18 +808,25 @@ pub fn run() -> std::io::Result<()> {
                 }
                 Action::Jump => {
                     if let Ok(line) = jump.value().parse::<i32>() {
-                        if line > 0 && line <= table.rows() {
-                            table.set_row_position(line - 1);
+                        if line > 0
+                            && let Some(index) = active
+                            && let Some(row) = view.borrow().window.position(Anchor {
+                                source: index,
+                                line: Some((line - 1) as usize),
+                            })
+                        {
+                            browsing.pending = 0;
+                            viewer::position(&mut table, row, 0.0);
                         } else {
                             status.set_label("行号超出已读取范围");
                         }
                     }
                 }
                 Action::Copy => {
-                    if let Some(log) = view.borrow().log.clone() {
+                    if view.borrow().log.is_some() {
                         let (first, _, last, _) = table.get_selection();
                         if first >= 0 {
-                            match log.copy_range(first as usize, (last - first + 1) as usize) {
+                            match view.borrow().window.copy(first as usize, last as usize) {
                                 Ok(text) => app::copy(&text),
                                 Err(error) => dialog::alert_default(&error.to_string()),
                             }
@@ -664,6 +850,10 @@ pub fn run() -> std::io::Result<()> {
                     scan_pending = false;
                     scan_id = 0;
                     read_id = 0;
+                    workers.cancel_adjacent();
+                    browsing.adjacent = 0;
+                    browsing.target = None;
+                    browsing.pending = 0;
                 }
                 Action::Search => {
                     let mut options = search_ui.options();
@@ -728,29 +918,81 @@ pub fn run() -> std::io::Result<()> {
                             Some((hit.line, hit.ranges.first().cloned().unwrap_or(0..0)));
                         let override_name = encoding_overrides.get(&hit.source.id()).cloned();
                         read_id = workers.open(hit.source, override_name);
-                        view.borrow_mut().log = None;
-                        view.borrow_mut().rows.clear();
+                        view.borrow_mut().clear();
                         table.set_rows(0);
                         let _ = tabs.set_value(&log_tab);
                         cancel.activate();
                     }
                 }
                 Action::CreateCopy(full) => {
-                    let log = view.borrow().log.clone();
+                    let (first, _, last, _) = table.get_selection();
+                    let selected_log = if !full && first >= 0 {
+                        let view = view.borrow();
+                        view.window.locate(first as usize).and_then(|anchor| {
+                            view.window.file(anchor.source).map(|file| file.log.clone())
+                        })
+                    } else {
+                        None
+                    };
+                    let log = selected_log.or_else(|| view.borrow().log.clone());
                     let Some(log) = log else {
                         continue;
                     };
+                    let selected_sources = if !full && first >= 0 {
+                        let view = view.borrow();
+                        let first_source = view
+                            .window
+                            .locate(first as usize)
+                            .map(|anchor| anchor.source);
+                        let last_source = view
+                            .window
+                            .locate((last as usize).min(view.window.rows().saturating_sub(1)))
+                            .map(|anchor| anchor.source);
+                        first_source
+                            .zip(last_source)
+                            .and_then(|(first, last)| {
+                                let start = view
+                                    .window
+                                    .files
+                                    .iter()
+                                    .position(|file| file.source == first)?;
+                                let end = view
+                                    .window
+                                    .files
+                                    .iter()
+                                    .position(|file| file.source == last)?;
+                                Some(
+                                    view.window
+                                        .files
+                                        .iter()
+                                        .skip(start)
+                                        .take(end - start + 1)
+                                        .map(|file| file.log.clone())
+                                        .collect::<Vec<_>>(),
+                                )
+                            })
+                            .unwrap_or_default()
+                    } else {
+                        Vec::new()
+                    };
+                    let cross_file = selected_sources.len() > 1;
                     let result = if full {
                         log.full_text()
+                    } else if cross_file {
+                        view.borrow().window.copy(first as usize, last as usize)
                     } else {
-                        let (first, _, last, _) = table.get_selection();
                         let default = if first >= 0 {
-                            format!("{}-{}", first + 1, last + 1)
+                            format!(
+                                "{}-{}",
+                                view.borrow().current_line(first) + 1,
+                                view.borrow().current_line(last) + 1
+                            )
                         } else {
                             format!(
                                 "{}-{}",
-                                table.row_position() + 1,
-                                (table.row_position() + 5).min(table.rows())
+                                view.borrow().current_line(table.row_position()) + 1,
+                                (view.borrow().current_line(table.row_position()) + 5)
+                                    .min(log.rows())
                             )
                         };
                         let Some(range) =
@@ -772,6 +1014,14 @@ pub fn run() -> std::io::Result<()> {
                     };
                     match result.and_then(|text| Document::from_log(&log, text)) {
                         Ok(mut document) => {
+                            if cross_file {
+                                document.title = "跨文件片段副本".into();
+                                document.output.encoding = encoding_rs::UTF_8;
+                                document.output.bom = false;
+                                document.decode_errors = selected_sources
+                                    .iter()
+                                    .any(|log| log.index.read().unwrap().errors);
+                            }
                             document.protected.extend(protected_sources.clone());
                             let index = editors.len();
                             tabs.begin();
@@ -1021,8 +1271,7 @@ pub fn run() -> std::io::Result<()> {
                     workers.cancel_view();
                     read_id = 0;
                     search_id = 0;
-                    view.borrow_mut().log = None;
-                    view.borrow_mut().rows.clear();
+                    view.borrow_mut().clear();
                     table.set_rows(0);
                     search_ui.clear();
                     preview_input = None;
@@ -1030,29 +1279,36 @@ pub fn run() -> std::io::Result<()> {
                     status.set_label("已释放查看内容与搜索结果，可重新打开来源");
                 }
                 Action::Bookmark => {
-                    let log = view.borrow().log.clone();
-                    if let Some(log) = log {
-                        let (first, _, _, _) = table.get_selection();
-                        let number = if first >= 0 {
-                            first as usize
-                        } else {
-                            table.row_position().max(0) as usize
-                        };
-                        if let Some(line) = log.read_range(number, 1)?.first() {
-                            if settings.bookmarks.len() >= 1000 {
-                                status.set_label("书签达到 1,000 条上限");
-                                continue;
-                            }
-                            let label = format!("{} · 第 {} 行", log.source.label(), number + 1);
-                            settings.bookmarks.push(Bookmark {
-                                source: log.source.id(),
-                                line: number,
-                                digest: minecraft_logs_viewer::settings::digest(&line.raw),
-                                label: label.clone(),
-                            });
-                            bookmarks.add(&label);
-                            status.set_label("已添加书签");
+                    let (first, _, _, _) = table.get_selection();
+                    let row = if first >= 0 {
+                        first
+                    } else {
+                        table.row_position()
+                    };
+                    let reference = {
+                        let view = view.borrow();
+                        view.window.locate(row.max(0) as usize).and_then(|anchor| {
+                            view.window
+                                .file(anchor.source)
+                                .map(|file| (file.log.clone(), anchor.line.unwrap_or(0)))
+                        })
+                    };
+                    if let Some((log, number)) = reference
+                        && let Some(line) = log.read_range(number, 1)?.first()
+                    {
+                        if settings.bookmarks.len() >= 1000 {
+                            status.set_label("书签达到 1,000 条上限");
+                            continue;
                         }
+                        let label = format!("{} · 第 {} 行", log.source.label(), number + 1);
+                        settings.bookmarks.push(Bookmark {
+                            source: log.source.id(),
+                            line: number,
+                            digest: minecraft_logs_viewer::settings::digest(&line.raw),
+                            label: label.clone(),
+                        });
+                        bookmarks.add(&label);
+                        status.set_label("已添加书签");
                     }
                 }
                 Action::OpenBookmark => {
@@ -1078,36 +1334,48 @@ pub fn run() -> std::io::Result<()> {
                     }
                 }
                 Action::Sort => {
-                    let mut order: Vec<_> = (0..sources.len()).collect();
-                    order.sort_by_key(|index| {
-                        if sort.value() == 1 {
-                            format!(
-                                "{}:{}",
-                                date(&sources[*index]).unwrap_or_else(|| "9999-99-99".into()),
-                                sources[*index].label()
-                            )
-                        } else {
-                            sources[*index].label().to_lowercase()
+                    let order = source_order(&sources, sort.value() == 1);
+                    let changed = browsing.order != order;
+                    browsing.order = order.clone();
+                    if changed {
+                        workers.cancel_adjacent();
+                        browsing.adjacent = 0;
+                        browsing.target = None;
+                        browsing.pending = 0;
+                        browsing.failed.clear();
+                        let top = view.borrow().current_line(table.row_position());
+                        let log = view.borrow().log.clone();
+                        if let Some(index) = active
+                            && let Some(log) = log
+                        {
+                            view.borrow_mut().window.reset(index, log);
+                            viewer::extent(&mut table, &view.borrow());
+                            viewer::position(&mut table, top.saturating_add(1), 0.0);
                         }
-                    });
+                    }
                     tree.clear();
                     source_items = vec![None; sources.len()];
                     for index in order {
                         source_items[index] = add_source(&mut tree, &sources[index], index);
                     }
+                    if let Some(index) = active
+                        && let Some(Some(item)) = source_items.get_mut(index)
+                    {
+                        item.select(1);
+                    }
                 }
                 Action::Inspect => {
                     let row = table.callback_row();
                     if row >= 0
-                        && let Some(log) = &view.borrow().log
-                        && let Some(line) = log.read_range(row as usize, 1)?.first()
+                        && let Some((log, number)) = view.borrow().line_at(row)
+                        && let Some(line) = log.read_range(number, 1)?.first()
                     {
                         let record = minecraft_logs_viewer::text::parse_record(
                             &minecraft_logs_viewer::format::StyledLine::parse(&line.raw).text,
                         );
                         status.set_label(&format!(
                             "第 {} 行 · 时间 {} · 级别 {} · 线程 {} · Logger {}",
-                            row + 1,
+                            number + 1,
                             record.time.as_deref().unwrap_or("未知"),
                             record.level.as_deref().unwrap_or("未知"),
                             record.thread.as_deref().unwrap_or("未知"),
@@ -1115,8 +1383,18 @@ pub fn run() -> std::io::Result<()> {
                         ));
                     }
                 }
+                Action::Scroll(delta) => {
+                    if smoke {
+                        eprintln!("smoke: wheel={delta}, row={}", table.row_position());
+                    }
+                    browsing.pending = browsing.pending.saturating_add(delta as i64);
+                    pending_jump = None;
+                    pending_bookmark = None;
+                    restored_position = true;
+                }
             }
         }
+        browsing.sync(read_id, &workers, &mut view.borrow_mut());
         for _ in 0..128 {
             let Ok(event) = workers.events.try_recv() else {
                 break;
@@ -1166,13 +1444,17 @@ pub fn run() -> std::io::Result<()> {
                         sources.len(),
                         failures.len()
                     ));
-                    if active.is_none() && !sources.is_empty() {
-                        active = Some(0);
-                        if let Some(Some(item)) = source_items.first_mut() {
+                    browsing.order = source_order(&sources, sort.value() == 1);
+                    commands.send(Action::Sort);
+                    if active.is_none()
+                        && let Some(first) = browsing.order.first().copied()
+                    {
+                        active = Some(first);
+                        if let Some(Some(item)) = source_items.get_mut(first) {
                             item.select(1);
                             tree.redraw();
                         }
-                        read_id = workers.open(sources[0].clone(), None);
+                        read_id = workers.open(sources[first].clone(), None);
                     } else if sources.is_empty() {
                         cancel.deactivate();
                     }
@@ -1184,15 +1466,36 @@ pub fn run() -> std::io::Result<()> {
                     }
                 }
                 Event::Loaded(id, log) if id == read_id => {
+                    browsing.sync(read_id, &workers, &mut view.borrow_mut());
                     let index = log.index.read().unwrap().clone();
-                    table.set_rows(index.lines.min(i32::MAX as usize) as i32);
+                    let source = sources
+                        .iter()
+                        .position(|source| source.id() == log.source.id())
+                        .unwrap_or(usize::MAX);
+                    browsing.main = (!index.complete).then_some(source);
+                    if !view.borrow().window.files.is_empty()
+                        && view.borrow().window.file(source).is_none()
+                        && active != Some(source)
+                    {
+                        continue;
+                    }
+                    publish_file(
+                        &mut table,
+                        &mut view.borrow_mut(),
+                        source,
+                        log.clone(),
+                        false,
+                    );
                     view.borrow_mut().log = Some(log.clone());
-                    view.borrow_mut().rows.clear();
-                    table.redraw();
                     if let Some((line, range)) = &pending_jump
                         && *line < index.lines
                     {
-                        table.set_row_position(*line as i32);
+                        if let Some(row) = view.borrow().window.position(Anchor {
+                            source,
+                            line: Some(*line),
+                        }) {
+                            viewer::position(&mut table, row, 0.0);
+                        }
                         view.borrow_mut().focus = Some((*line, range.clone()));
                         pending_jump = None;
                     }
@@ -1214,61 +1517,15 @@ pub fn run() -> std::io::Result<()> {
                         && let Some(line) = settings.positions.get(&log.source.id())
                         && *line < index.lines
                     {
-                        table.set_row_position(*line as i32);
+                        if let Some(row) = view.borrow().window.position(Anchor {
+                            source,
+                            line: Some(*line),
+                        }) {
+                            viewer::position(&mut table, row, 0.0);
+                        }
                         restored_position = true;
                     }
-                    let title = if preview_input
-                        .as_ref()
-                        .is_some_and(|owner| owner.path() == log.source.path)
-                    {
-                        log.source.relative.clone()
-                    } else {
-                        log.source
-                            .member
-                            .as_ref()
-                            .map(|m| m.name.clone())
-                            .unwrap_or_else(|| {
-                                log.source
-                                    .path
-                                    .file_name()
-                                    .unwrap_or_default()
-                                    .to_string_lossy()
-                                    .into_owned()
-                            })
-                    };
-                    file_heading.set_label(&title);
-                    file_heading.set_tooltip(&log.source.label());
-                    source_metrics.set_label(&format!(
-                        "{}  ·  {} 行  ·  只读",
-                        log.encoding.encoding.name(),
-                        index.lines
-                    ));
-                    source_metrics.set_tooltip(&format!(
-                        "{} · {} · {} · {}",
-                        log.encoding.basis,
-                        if log.encoding.bom {
-                            "有 BOM"
-                        } else {
-                            "无 BOM"
-                        },
-                        if index.crlf > 0 && index.lf > 0 {
-                            "混合换行"
-                        } else if index.crlf > 0 {
-                            "CRLF"
-                        } else {
-                            "LF"
-                        },
-                        if index.errors {
-                            "存在解码错误"
-                        } else {
-                            "尚未发现解码错误"
-                        }
-                    ));
-                    source_metrics.set_label_color(if index.errors {
-                        theme::ERROR
-                    } else {
-                        theme::MUTED
-                    });
+                    show_log(&log, &mut file_heading, &mut source_metrics);
                     copy.activate();
                     if log.source.is_live() {
                         follow.activate();
@@ -1309,8 +1566,7 @@ pub fn run() -> std::io::Result<()> {
                         status.set_label("来源内容已变化，书签定位需要重新确认");
                         status.set_label_color(theme::WARNING);
                     }
-                    if log.live
-                        && let Ok(path) = log.source.path.canonicalize()
+                    if let Ok(path) = log.source.path.canonicalize()
                         && !protected_sources.iter().any(|(old, identity)| {
                             *old == path && *identity == log.source.revision.identity
                         })
@@ -1334,11 +1590,63 @@ pub fn run() -> std::io::Result<()> {
                     copy.deactivate();
                     go.deactivate();
                     cancel.deactivate();
-                    view.borrow_mut().log = None;
-                    view.borrow_mut().rows.clear();
+                    view.borrow_mut().clear();
                     table.set_rows(0);
                 }
                 Event::Hits(id, hits) if id == search_id => search_ui.add(hits),
+                Event::Adjacent(id, log) if id == browsing.adjacent => {
+                    let protection = (
+                        std::path::absolute(&log.source.path)?,
+                        log.source.revision.identity.clone(),
+                    );
+                    if !protected_sources.contains(&protection) {
+                        protected_sources.push(protection);
+                    }
+                    if let Some((source, prepend)) = browsing.target {
+                        if view
+                            .borrow()
+                            .log
+                            .as_ref()
+                            .is_some_and(|active| active.source.id() == log.source.id())
+                        {
+                            show_log(&log, &mut file_heading, &mut source_metrics);
+                        }
+                        let complete = log.index.read().unwrap().complete;
+                        let caught_up = view.borrow().window.file(source).is_none_or(|old| {
+                            old.log.source.revision != log.source.revision
+                                || log.rows() >= old.lines
+                        });
+                        if (!prepend || complete) && (caught_up || complete) {
+                            publish_file(&mut table, &mut view.borrow_mut(), source, log, prepend);
+                        }
+                        if complete {
+                            browsing.target = None;
+                            browsing.adjacent = 0;
+                        }
+                    }
+                }
+                Event::AdjacentFailed(id, failure) if id == browsing.adjacent => {
+                    if let Some((source, _)) = browsing.target.take() {
+                        browsing.failed.insert(source);
+                        if let Some(file) = view
+                            .borrow_mut()
+                            .window
+                            .files
+                            .iter_mut()
+                            .find(|file| file.source == source)
+                        {
+                            file.complete = true;
+                            file.failed = true;
+                        }
+                        errors.add(&format!("{}: {failure}", sources[source].label()));
+                        status.set_label(&format!(
+                            "相邻日志读取失败：{} · {failure}",
+                            sources[source].label()
+                        ));
+                        status.set_label_color(theme::ERROR);
+                    }
+                    browsing.adjacent = 0;
+                }
                 Event::Waiting(id) if id == read_id => {
                     status.set_label("等待新的 latest.log · 可取消跟随");
                     status.set_label_color(theme::WARNING);
@@ -1438,16 +1746,220 @@ pub fn run() -> std::io::Result<()> {
                 _ => {}
             }
         }
+        if !view.borrow().window.files.is_empty() {
+            viewer::global_range(&mut table);
+            let page = viewer::page_rows(&table);
+            let mut top = table.row_position().max(0) as usize;
+            let offset = table.scrollbar().value() - top as f64 * table.row_height(0).max(1) as f64;
+            let (first, last, rows, complete) = {
+                let view = view.borrow();
+                let files = &view.window.files;
+                (
+                    files.front().unwrap().source,
+                    files.back().unwrap().source,
+                    view.window.rows(),
+                    files.back().unwrap().complete,
+                )
+            };
+            let streaming =
+                read_id != 0 && !scan_pending && !follow.is_checked() && preview_input.is_none();
+            let previous = streaming && browsing.neighbor(first, true).is_some();
+            let next =
+                read_id != 0 && !complete || streaming && browsing.neighbor(last, false).is_some();
+            let (position, pending) =
+                minecraft_logs_viewer::browse::scroll(top, browsing.pending, rows, previous, next);
+            browsing.pending = pending;
+            if top != position {
+                viewer::position(&mut table, position, offset);
+                top = position;
+            }
+            let removed = view.borrow_mut().window.trim(top, page);
+            top -= removed;
+            viewer::extent(&mut table, &view.borrow());
+            if removed > 0 {
+                viewer::position(&mut table, top, offset);
+                table.set_selection(-1, -1, -1, -1);
+                view.borrow_mut().rows.clear();
+            }
+            if let Some((target, prepend)) = browsing.target {
+                let view = view.borrow();
+                let edge = if prepend {
+                    view.window.files.front()
+                } else {
+                    view.window.files.back()
+                }
+                .unwrap()
+                .source;
+                let stale = view.window.file(target).is_none()
+                    && browsing.neighbor(edge, prepend) != Some(target);
+                if stale || browsing.pending < 0 && !prepend {
+                    workers.cancel_adjacent();
+                    browsing.target = None;
+                    browsing.adjacent = 0;
+                }
+            }
+            let current = {
+                let view = view.borrow();
+                view.window.locate(top).and_then(|anchor| {
+                    view.window
+                        .file(anchor.source)
+                        .map(|file| (anchor.source, file.log.clone()))
+                })
+            };
+            if let Some((source, log)) = current {
+                let (changed, replaced) = {
+                    let view = view.borrow();
+                    (
+                        view.log
+                            .as_ref()
+                            .is_none_or(|old| old.source.id() != log.source.id()),
+                        view.log
+                            .as_ref()
+                            .is_none_or(|old| !std::sync::Arc::ptr_eq(old, &log)),
+                    )
+                };
+                if changed || replaced {
+                    if let Some(old) = view.borrow().log.clone() {
+                        let old_position = active.and_then(|old_source| {
+                            browsing.order.iter().position(|index| *index == old_source)
+                        });
+                        let new_position = browsing.order.iter().position(|index| *index == source);
+                        let leaving = if new_position > old_position {
+                            old.rows().saturating_sub(1)
+                        } else {
+                            0
+                        };
+                        settings.position(old.source.id(), leaving);
+                    }
+                    active = (source < sources.len()).then_some(source);
+                    view.borrow_mut().log = Some(log.clone());
+                    if changed {
+                        view.borrow_mut().focus = None;
+                    }
+                    show_log(&log, &mut file_heading, &mut source_metrics);
+                    encoding.set_value(
+                        encoding_overrides
+                            .get(&log.source.id())
+                            .and_then(|name| {
+                                ENCODINGS.iter().position(|candidate| candidate == name)
+                            })
+                            .unwrap_or(0) as i32,
+                    );
+                    if log.source.is_live() {
+                        follow.activate();
+                    } else {
+                        follow.deactivate();
+                    }
+                    if source_items
+                        .iter()
+                        .flatten()
+                        .filter(|item| item.is_selected())
+                        .count()
+                        <= 1
+                    {
+                        for item in source_items.iter_mut().flatten() {
+                            item.select(0);
+                        }
+                        if let Some(Some(item)) = source_items.get_mut(source) {
+                            item.select(1);
+                        }
+                        tree.redraw();
+                    }
+                    if view
+                        .borrow()
+                        .window
+                        .file(source)
+                        .is_some_and(|file| file.failed)
+                    {
+                        source_metrics.set_label("读取未完成 · 仅显示可用内容");
+                        source_metrics.set_label_color(theme::ERROR);
+                        status.set_label(&format!("来源未完整读取 · {}", log.source.label()));
+                        status.set_label_color(theme::ERROR);
+                    } else {
+                        status.set_label(&format!("连续浏览 · {}", log.source.label()));
+                        status.set_label_color(theme::MUTED);
+                    }
+                }
+            }
+            if streaming && browsing.target.is_none() {
+                let (first, last, complete, rows, last_start, first_complete) = {
+                    let view = view.borrow();
+                    let files = &view.window.files;
+                    (
+                        files.front().unwrap().source,
+                        files.back().unwrap().source,
+                        files.back().unwrap().complete,
+                        view.window.rows(),
+                        view.window
+                            .position(Anchor {
+                                source: files.back().unwrap().source,
+                                line: None,
+                            })
+                            .unwrap(),
+                        files.front().unwrap().complete,
+                    )
+                };
+                let candidate = if browsing.pending < 0 && first_complete {
+                    browsing.neighbor(first, true).map(|source| (source, true))
+                } else if browsing.pending >= 0
+                    && !complete
+                    && browsing.main != Some(last)
+                    && top.saturating_add(page * 2) >= rows
+                {
+                    Some((last, false))
+                } else if complete
+                    && top.saturating_add(page * 2) >= rows
+                    && last_start <= top.saturating_add(page)
+                {
+                    browsing.neighbor(last, false).map(|source| (source, false))
+                } else {
+                    None
+                };
+                if let Some((source, prepend)) = candidate {
+                    let mut input = sources[source].clone();
+                    match minecraft_logs_viewer::source::Revision::read(&input.path) {
+                        Ok(revision) => {
+                            input.revision = revision;
+                            browsing.adjacent = workers.adjacent(
+                                input,
+                                encoding_overrides.get(&sources[source].id()).cloned(),
+                            );
+                            browsing.target = Some((source, prepend));
+                            if browsing.pending != 0 {
+                                status.set_label("继续滚动 · 正在读取相邻日志，滚动距离已保留");
+                                status.set_label_color(theme::WARNING);
+                            }
+                        }
+                        Err(error) => {
+                            browsing.failed.insert(source);
+                            errors.add(&format!("{}: {error}", sources[source].label()));
+                            status.set_label(&format!("相邻日志读取失败：{error}"));
+                            status.set_label_color(theme::ERROR);
+                        }
+                    }
+                }
+            }
+            if let Some(source) = active {
+                viewer::file_range(&mut table, &view.borrow(), source);
+            }
+        }
         if smoke && started.elapsed() > Duration::from_secs(3) {
             if let Some(destination) = &screenshot {
                 crate::ui::capture::window(&mut window, destination)?;
             }
             eprintln!(
-                "smoke: sources={}, rows={}, hits={}, copies={}",
+                "smoke: sources={}, rows={}, hits={}, copies={}, current={}, top_line={}, loaded={}",
                 sources.len(),
                 table.rows(),
                 search_ui.hits.borrow().len(),
-                editors.iter().flatten().count()
+                editors.iter().flatten().count(),
+                view.borrow()
+                    .log
+                    .as_ref()
+                    .map(|log| log.source.label())
+                    .unwrap_or_default(),
+                view.borrow().current_line(table.row_position()) + 1,
+                view.borrow().window.files.len()
             );
             window.hide();
             if let Some(error) = smoke_error {
@@ -1462,7 +1974,10 @@ pub fn run() -> std::io::Result<()> {
     workers.cancel();
     if !smoke {
         if let Some(log) = &view.borrow().log {
-            settings.position(log.source.id(), table.row_position().max(0) as usize);
+            settings.position(
+                log.source.id(),
+                view.borrow().current_line(table.row_position()),
+            );
         }
         settings.window = [window.w(), window.h()];
         settings.recursive = recursive.is_checked();

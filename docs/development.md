@@ -44,6 +44,8 @@ minecraft-logs-viewer ./tests/fixtures --smoke --smoke-query ABCDEF --smoke-save
 
 测试模式跳过个人设置读写，3 秒后检查状态并退出。截图从窗口自身 ImageSurface 取得，包含应用实际绘制。`--window-size 1040x620` 可检查最小尺寸；smoke 不替代原生输入、文件选择器和剪贴板的人工验收。
 
+Windows 使用 `./scripts/smoke-scroll.ps1` 进行实际输入验证。脚本仅向本次启动的测试进程发送 Win32 滚轮和鼠标消息，检查前后跨文件、gzip / 空文件、当前文件滚动条拖动，以及工作目录 / 程序目录为 `logs` 的自动识别。样本、截图与诊断输出位于被忽略的 `build/`；测试使用人工日志并跳过个人设置。
+
 ## Git 记录
 
 开发在 `dev` 分支进行，每个可验证阶段单独提交。提交前执行对应检查和 `git diff --check`；个人日志、运行配置、构建缓存与测试生成物不进入提交。`origin` 指向上述 GitHub 仓库，提交推送到 `origin/dev`。

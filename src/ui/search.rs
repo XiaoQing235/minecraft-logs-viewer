@@ -91,7 +91,7 @@ impl SearchUi {
         layout.fixed(&filters, 56);
         let hits = Rc::new(RefCell::new(Vec::<Hit>::new()));
         let mut results = TableRow::default();
-        results.set_frame(FrameType::FlatBox);
+        results.set_frame(FrameType::NoBox);
         results.set_table_frame(FrameType::FlatBox);
         results.set_color(theme::BACKGROUND);
         results.set_cols(3);

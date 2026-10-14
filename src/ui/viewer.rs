@@ -6,6 +6,7 @@ use fltk::{
     table::{TableContext, TableRow, TableRowSelectMode},
 };
 use minecraft_logs_viewer::{
+    browse::{Anchor, Window},
     format::StyledLine,
     text::{IndexedLog, Line, parse_record},
 };
@@ -19,6 +20,92 @@ pub struct View {
     pub obfuscate: bool,
     pub font_size: i32,
     pub focus: Option<(usize, std::ops::Range<usize>)>,
+    pub window: Window,
+    row_source: Option<usize>,
+}
+
+impl View {
+    pub fn clear(&mut self) {
+        self.log = None;
+        self.rows.clear();
+        self.row_source = None;
+        self.window.files.clear();
+    }
+    pub fn line_at(&self, row: i32) -> Option<(Arc<IndexedLog>, usize)> {
+        let anchor = self.window.locate(row.max(0) as usize)?;
+        Some((self.window.file(anchor.source)?.log.clone(), anchor.line?))
+    }
+    pub fn current_line(&self, row: i32) -> usize {
+        self.window
+            .locate(row.max(0) as usize)
+            .and_then(|anchor| anchor.line)
+            .unwrap_or(0)
+    }
+}
+
+pub fn page_rows(table: &TableRow) -> usize {
+    let height = if table.rows() > 0 {
+        table.row_height(0)
+    } else {
+        theme::ROW_HEIGHT
+    };
+    ((table.h() - table.col_header_height() - 14) / height.max(1)).max(1) as usize
+}
+
+pub fn extent(table: &mut TableRow, view: &View) {
+    // Trailing viewport space lets the final real row reach the top, including
+    // short/empty files. It also keeps the scrollbar visible at every file size.
+    let rows = view.window.rows();
+    let extent = if rows == 0 {
+        0
+    } else {
+        rows.saturating_add(page_rows(table)).min(i32::MAX as usize) as i32
+    };
+    if table.rows() != extent {
+        table.set_rows(extent);
+    }
+    global_range(table);
+}
+
+pub fn global_range(table: &mut TableRow) {
+    if table.rows() > 0 {
+        let height = table.row_height(0).max(1);
+        let viewport = table.h() - table.col_header_height() - 14;
+        table.scrollbar().set_bounds(
+            0.0,
+            (table.rows() as f64 * height as f64 - viewport as f64).max(0.0),
+        );
+    }
+}
+
+pub fn position(table: &mut TableRow, row: usize, offset: f64) {
+    if table.rows() == 0 {
+        return;
+    }
+    global_range(table);
+    let mut scrollbar = table.scrollbar();
+    let pixel = row as f64 * table.row_height(0).max(1) as f64 + offset;
+    scrollbar.set_value(pixel.clamp(0.0, scrollbar.maximum()));
+    // Updating rows can clamp the native scrollbar into the same row while
+    // retaining a different pixel offset. Its callback updates both positions.
+    scrollbar.do_callback();
+}
+
+pub fn file_range(table: &mut TableRow, view: &View, source: usize) {
+    if let Some(file) = view.window.file(source)
+        && let Some(start) = view.window.position(Anchor { source, line: None })
+    {
+        let height = table.row_height(0).max(1) as f64;
+        let mut scrollbar = table.scrollbar();
+        scrollbar.set_bounds(start as f64 * height, (start + file.lines) as f64 * height);
+        scrollbar
+            .set_slider_size((page_rows(table) as f64 / file.lines.max(1) as f64).min(1.0) as f32);
+        scrollbar.set_tooltip("当前文件范围 · 拖动定位；鼠标滚轮可跨文件浏览");
+    }
+}
+
+pub fn anchor(table: &TableRow, view: &View) -> Option<Anchor> {
+    view.window.locate(table.row_position().max(0) as usize)
 }
 
 pub fn build() -> (TableRow, Rc<RefCell<View>>) {
@@ -28,7 +115,9 @@ pub fn build() -> (TableRow, Rc<RefCell<View>>) {
     }));
     let mut table = TableRow::default();
     table.set_color(theme::BACKGROUND);
-    table.set_frame(FrameType::FlatBox);
+    // Fl_Table draws its outer frame after its child scrollbars. A filled box
+    // paints over them; use a frame that does not fill the widget.
+    table.set_frame(FrameType::NoBox);
     table.set_table_frame(FrameType::FlatBox);
     table.set_cols(4);
     table.set_col_width(0, 55);
@@ -40,6 +129,19 @@ pub fn build() -> (TableRow, Rc<RefCell<View>>) {
     table.set_col_header_height(32);
     table.set_row_header(false);
     table.set_type(TableRowSelectMode::Multi);
+    table.super_handle_first(false);
+    table.set_scrollbar_size(14);
+    let mut scrollbar = table.scrollbar();
+    scrollbar.set_color(theme::CONTROL);
+    scrollbar.set_selection_color(theme::MUTED);
+    scrollbar.set_frame(FrameType::FlatBox);
+    scrollbar.set_slider_frame(FrameType::FlatBox);
+    scrollbar.set_tooltip("连续日志窗口 · 拖动定位，滚轮跨文件浏览");
+    let mut horizontal = table.hscrollbar();
+    horizontal.set_color(theme::CONTROL);
+    horizontal.set_selection_color(theme::MUTED);
+    horizontal.set_frame(FrameType::FlatBox);
+    horizontal.set_slider_frame(FrameType::FlatBox);
     table.end();
     let state = view.clone();
     table.draw_cell(move |table, context, row, col, x, y, w, h| {
@@ -93,13 +195,46 @@ pub fn build() -> (TableRow, Rc<RefCell<View>>) {
             return;
         }
         let mut state = state.borrow_mut();
-        let Some(log) = state.log.clone() else {
+        let Some(anchor) = state.window.locate(row as usize) else {
+            draw::set_draw_color(theme::BACKGROUND);
+            draw::draw_rectf(x, y, w, h);
             return;
         };
-        if !state.rows.iter().any(|line| line.number == row as usize) {
-            state.rows = log.read_range(row as usize, 128).unwrap_or_default();
+        let file = state.window.file(anchor.source).unwrap();
+        let failed = file.failed;
+        let log = file.log.clone();
+        let Some(number) = anchor.line else {
+            draw::push_clip(x, y, w, h);
+            draw::set_draw_color(theme::SURFACE);
+            draw::draw_rectf(x, y, w, h);
+            draw::set_draw_color(theme::RULE);
+            draw::draw_line(x, y + h - 1, x + w, y + h - 1);
+            if col == 3 {
+                draw::set_font(theme::UI_FONT, theme::SMALL);
+                draw::set_draw_color(if failed { theme::ERROR } else { theme::MUTED });
+                draw::draw_text2(
+                    &format!(
+                        "{}{}",
+                        log.source.label(),
+                        if failed { " · 读取未完成" } else { "" }
+                    ),
+                    x + 12,
+                    y,
+                    w - 24,
+                    h,
+                    Align::Left | Align::Inside,
+                );
+            }
+            draw::pop_clip();
+            return;
+        };
+        if state.row_source != Some(anchor.source)
+            || !state.rows.iter().any(|line| line.number == number)
+        {
+            state.rows = log.read_range(number, 128).unwrap_or_default();
+            state.row_source = Some(anchor.source);
         }
-        let Some(line) = state.rows.iter().find(|line| line.number == row as usize) else {
+        let Some(line) = state.rows.iter().find(|line| line.number == number) else {
             return;
         };
         draw::push_clip(x, y, w, h);
@@ -118,7 +253,7 @@ pub fn build() -> (TableRow, Rc<RefCell<View>>) {
         if col == 0 {
             draw::set_draw_color(theme::DISABLED);
             draw::draw_text2(
-                &(row + 1).to_string(),
+                &(number + 1).to_string(),
                 x + 4,
                 y,
                 w - 12,
@@ -190,6 +325,10 @@ pub fn build() -> (TableRow, Rc<RefCell<View>>) {
                     let width = draw::width(&shown) as i32;
                     if let Some((focus_row, range)) = &state.focus
                         && *focus_row == line.number
+                        && state
+                            .log
+                            .as_ref()
+                            .is_some_and(|active| active.source.id() == log.source.id())
                         && range.start < span.raw.end
                         && range.end > span.raw.start
                     {

@@ -10,7 +10,8 @@ use std::{
 };
 
 pub const SINGLE_LIMIT: u64 = 1 << 30;
-pub const CACHE_LIMIT: u64 = 2 << 30;
+// Previous/current snapshots plus the next member's input and decoded snapshot.
+pub const CACHE_LIMIT: u64 = 4 << 30;
 
 #[derive(Clone)]
 pub struct Cache(Arc<CacheRoot>);
@@ -103,7 +104,7 @@ impl Write for LimitedWriter<'_> {
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
                 (used + size <= CACHE_LIMIT).then_some(used + size)
             })
-            .map_err(|_| io::Error::other("缓存超过 2 GiB，请关闭来源或清理缓存"))?;
+            .map_err(|_| io::Error::other("缓存超过 4 GiB，请关闭来源或清理缓存"))?;
         match self.file.write(bytes) {
             Ok(written) => {
                 self.owner

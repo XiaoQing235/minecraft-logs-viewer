@@ -21,6 +21,8 @@ pub enum Event {
     Source(u64, LogSource),
     Scanned(u64, Vec<String>),
     Loaded(u64, Arc<IndexedLog>),
+    Adjacent(u64, Arc<IndexedLog>),
+    AdjacentFailed(u64, String),
     Failed(u64, String),
     Hits(u64, Vec<Hit>),
     Searched(u64, Report),
@@ -132,6 +134,7 @@ fn send(sender: &SyncSender<Event>, mut event: Event, cancel: &AtomicBool) {
 pub struct Workers {
     scan: Lane<(PathBuf, bool)>,
     read: Lane<(LogSource, Option<String>, bool)>,
+    adjacent: Lane<(LogSource, Option<String>)>,
     search: Lane<(Vec<LogSource>, Options)>,
     save: Lane<SaveRequest>,
     pub events: Receiver<Event>,
@@ -195,6 +198,30 @@ impl Workers {
             }
         });
         let search_cache = cache.clone();
+        let adjacent_cache = cache.clone();
+        let adjacent_sender = sender.clone();
+        let adjacent = Lane::new(move |task: Task<(LogSource, Option<String>)>| {
+            let result = text::open(
+                task.command.0,
+                task.command.1.as_deref(),
+                &adjacent_cache,
+                &task.cancel,
+                |log| {
+                    send(
+                        &adjacent_sender,
+                        Event::Adjacent(task.id, log),
+                        &task.cancel,
+                    )
+                },
+            );
+            if let Err(error) = result {
+                send(
+                    &adjacent_sender,
+                    Event::AdjacentFailed(task.id, error.to_string()),
+                    &task.cancel,
+                );
+            }
+        });
         let search_sender = sender.clone();
         let search = Lane::new(move |task: Task<(Vec<LogSource>, Options)>| {
             match search::run(
@@ -254,6 +281,7 @@ impl Workers {
         Ok(Self {
             scan,
             read,
+            adjacent,
             search,
             save,
             events,
@@ -278,6 +306,7 @@ impl Workers {
     pub fn cancel(&self) {
         self.scan.cancel();
         self.read.cancel();
+        self.adjacent.cancel();
         self.search.cancel();
     }
     pub fn cancel_search(&self) {
@@ -285,6 +314,7 @@ impl Workers {
     }
     pub fn cancel_view(&self) {
         self.read.cancel();
+        self.adjacent.cancel();
         self.search.cancel();
     }
     pub fn search(&mut self, sources: Vec<LogSource>, options: Options) -> u64 {
@@ -301,5 +331,13 @@ impl Workers {
         let id = self.next();
         self.read.replace(id, (source, encoding, true));
         id
+    }
+    pub fn adjacent(&mut self, source: LogSource, encoding: Option<String>) -> u64 {
+        let id = self.next();
+        self.adjacent.replace(id, (source, encoding));
+        id
+    }
+    pub fn cancel_adjacent(&self) {
+        self.adjacent.cancel();
     }
 }
