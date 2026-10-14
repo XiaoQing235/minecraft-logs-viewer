@@ -44,7 +44,7 @@ minecraft-logs-viewer ./tests/fixtures --smoke --smoke-query ABCDEF --smoke-save
 
 测试模式跳过个人设置读写，3 秒后检查状态并退出。截图从窗口自身 ImageSurface 取得，包含应用实际绘制。`--window-size 1040x620` 可检查最小尺寸；smoke 不替代原生输入、文件选择器和剪贴板的人工验收。
 
-Windows 使用 `./scripts/smoke-scroll.ps1` 进行实际输入验证。脚本仅向本次启动的测试进程发送 Win32 滚轮和鼠标消息，检查前后跨文件、gzip / 空文件、当前文件滚动条拖动，以及工作目录 / 程序目录为 `logs` 的自动识别。样本、截图与诊断输出位于被忽略的 `build/`；测试使用人工日志并跳过个人设置。
+Windows 使用 `./scripts/smoke-scroll.ps1` 进行实际输入验证。脚本仅向本次启动的测试进程发送 Win32 滚轮、鼠标和键盘消息，检查前后跨文件、gzip / 空文件、当前文件滚动条拖动，以及工作目录 / 程序目录为 `logs` 的自动识别。Page Up / Page Down 检查覆盖点击取得日志焦点、同文件翻页、前后跨文件、首尾边界和较小窗口的翻页距离。样本、截图与诊断输出位于被忽略的 `build/`；测试使用人工日志并跳过个人设置。
 
 Windows 的 `cargo test` 还运行表格局部重绘回归检查：在离屏 GDI 图像上绘制实际日志和搜索表格，再通过 `update_child` 保留选取产生的局部重绘标记，比较未选中行的像素。检查覆盖单行 / 多行选取、取消选取及缩放后的选取。普通 ImageSurface 截图会强制完整重绘，不能单独验证此类行消失问题。
 

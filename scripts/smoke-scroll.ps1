@@ -55,6 +55,20 @@ public static class MlvWheel {
                 throw new Exception("Cannot post wheel event");
         }
     }
+    public static void Page(IntPtr window, int pages) {
+        Rect rect;
+        if (!GetClientRect(window, out rect)) throw new Exception("Cannot read test window");
+        var point = new IntPtr((long)(ushort)(rect.Right * 2 / 3) | ((long)(ushort)(rect.Bottom / 2) << 16));
+        if (!PostMessage(window, 0x0201, new IntPtr(1), point) ||
+            !PostMessage(window, 0x0202, IntPtr.Zero, point)) throw new Exception("Cannot focus log table");
+        int key = pages > 0 ? 0x22 : 0x21;
+        long data = 1 | ((pages > 0 ? 0x51L : 0x49L) << 16) | (1L << 24);
+        for (int i = 0; i < Math.Abs(pages); i++) {
+            if (!PostMessage(window, 0x0100, new IntPtr(key), new IntPtr(data)) ||
+                !PostMessage(window, 0x0101, new IntPtr(key), new IntPtr(data | (3L << 30))))
+                throw new Exception("Cannot post page key");
+        }
+    }
     public static void DragScrollbar(IntPtr window) {
         Rect rect;
         if (!GetClientRect(window, out rect)) throw new Exception("Cannot read test window");
@@ -71,8 +85,8 @@ public static class MlvWheel {
     }
 }
 '@
-function Check-Wheel([string]$name, [int]$forward, [int]$backward, [string]$expected) {
-    $process = Start-Process -FilePath $binary -ArgumentList $fixture, '--smoke', '--screenshot', "build/$name.bmp" -WindowStyle Hidden -PassThru -RedirectStandardError "build/$name.txt"
+function Check-Scroll([string]$name, [int]$forward, [int]$backward, [string]$expected, [switch]$PageKeys, [string]$WindowSize = '1280x820') {
+    $process = Start-Process -FilePath $binary -ArgumentList $fixture, '--smoke', '--screenshot', "build/$name.bmp", '--window-size', $WindowSize -WindowStyle Hidden -PassThru -RedirectStandardError "build/$name.txt"
     try {
         $clock = [Diagnostics.Stopwatch]::StartNew()
         $window = [IntPtr]::Zero
@@ -82,8 +96,11 @@ function Check-Wheel([string]$name, [int]$forward, [int]$backward, [string]$expe
         }
         if ($window -eq [IntPtr]::Zero) { throw 'Test window not found.' }
         [Threading.Thread]::Sleep(450)
-        [MlvWheel]::Wheel($window, $forward)
-        if ($backward) { [Threading.Thread]::Sleep(500); [MlvWheel]::Wheel($window, -$backward) }
+        if ($PageKeys) { [MlvWheel]::Page($window, $forward) } else { [MlvWheel]::Wheel($window, $forward) }
+        if ($backward) {
+            [Threading.Thread]::Sleep(500)
+            if ($PageKeys) { [MlvWheel]::Page($window, -$backward) } else { [MlvWheel]::Wheel($window, -$backward) }
+        }
         if (!$process.WaitForExit(6000)) { throw 'Window smoke timed out.' }
         if ($process.ExitCode) { throw "Window smoke failed: $($process.ExitCode)" }
         $result = Get-Content "build/$name.txt" -Raw
@@ -91,11 +108,17 @@ function Check-Wheel([string]$name, [int]$forward, [int]$backward, [string]$expe
         Write-Host "$name passed: $($result.Trim())"
     } finally { if (!$process.HasExited) { $process.Kill(); $process.WaitForExit() }; $process.Dispose() }
 }
-Check-Wheel 'scroll-forward' 4 0 'current=02\.log, top_line=3'
-Check-Wheel 'scroll-reverse' 4 2 'current=01\.log, top_line=6'
-Check-Wheel 'scroll-multiple' 16 0 'current=05\.log, top_line=8'
+Check-Scroll 'scroll-forward' 4 0 'current=02\.log, top_line=3'
+Check-Scroll 'scroll-reverse' 4 2 'current=01\.log, top_line=6'
+Check-Scroll 'scroll-multiple' 16 0 'current=05\.log, top_line=8'
+Check-Scroll 'page-forward' 1 0 '(?s)scroll=17.*current=02\.log, top_line=8' -PageKeys
+Check-Scroll 'page-reverse' 2 1 '(?s)scroll=-17.*current=02\.log, top_line=8' -PageKeys
+Check-Scroll 'page-start' 0 1 'current=01\.log, top_line=1' -PageKeys
+Check-Scroll 'page-end' 4 0 'current=05\.log, top_line=8' -PageKeys
+Check-Scroll 'page-small' 1 0 '(?s)scroll=10.*current=02\.log, top_line=1' -PageKeys -WindowSize '1040x620'
 $long = ((1..80 | ForEach-Object { "[12:34:56] [Server thread/INFO]: 01.log line $_" }) -join "`n") + "`n"
 [IO.File]::WriteAllText((Join-Path (Get-Location) "$fixture/01.log"), $long, [Text.UTF8Encoding]::new($false))
+Check-Scroll 'page-local' 2 1 '(?s)scroll=-17.*current=01\.log, top_line=17' -PageKeys
 $process = Start-Process -FilePath $binary -ArgumentList $fixture, '--smoke', '--screenshot', 'build/scrollbar-local.bmp' -WindowStyle Hidden -PassThru -RedirectStandardError build/scrollbar-local.txt
 try {
     $clock = [Diagnostics.Stopwatch]::StartNew()

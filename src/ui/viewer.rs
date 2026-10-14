@@ -100,7 +100,7 @@ pub fn file_range(table: &mut TableRow, view: &View, source: usize) {
         scrollbar.set_bounds(start as f64 * height, (start + file.lines) as f64 * height);
         scrollbar
             .set_slider_size((page_rows(table) as f64 / file.lines.max(1) as f64).min(1.0) as f32);
-        scrollbar.set_tooltip("当前文件范围 · 拖动定位；鼠标滚轮可跨文件浏览");
+        scrollbar.set_tooltip("当前文件范围 · 拖动定位；滚轮及 Page Up / Down 可跨文件浏览");
     }
 }
 

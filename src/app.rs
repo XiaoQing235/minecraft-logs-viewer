@@ -3,10 +3,11 @@ use fltk::{
     app,
     browser::HoldBrowser,
     dialog::{self, FileDialogOptions, FileDialogType, NativeFileChooser},
-    enums::{Align, CallbackTrigger, Event as UiEvent, FrameType, Shortcut},
+    enums::{Align, CallbackTrigger, Event as UiEvent, FrameType, Key, Shortcut},
     frame::Frame,
     group::{Flex, Group, Tabs},
     prelude::*,
+    table::TableContext,
     tree::{TreeItem, TreeSelect},
     window::Window,
 };
@@ -544,12 +545,32 @@ pub fn run() -> std::io::Result<()> {
     clear_cache.set_callback(move |_| commands.send(Action::ClearCache));
     sort.set_callback(move |_| commands.send(Action::Sort));
     table.set_callback(move |_| commands.send(Action::Inspect));
-    table.handle(move |_, event| {
+    table.handle(move |table, event| {
+        if event == UiEvent::Push
+            && app::event_mouse_button() == app::MouseButton::Left
+            && table
+                .cursor2rowcol()
+                .is_some_and(|(context, _, _, _)| context == TableContext::Cell)
+        {
+            let _ = table.take_focus();
+        }
         if event == UiEvent::MouseWheel
             && app::event_dx_value() == 0
             && !app::event_state().contains(Shortcut::Shift)
         {
             commands.send(Action::Scroll(app::event_dy_value().saturating_mul(3)));
+            return true;
+        }
+        if event == UiEvent::KeyDown
+            && !app::event_state()
+                .intersects(Shortcut::Shift | Shortcut::Ctrl | Shortcut::Alt | Shortcut::Meta)
+        {
+            let direction = match app::event_key() {
+                Key::PageUp => -1,
+                Key::PageDown => 1,
+                _ => return false,
+            };
+            commands.send(Action::Scroll(direction * viewer::page_rows(table) as i32));
             return true;
         }
         false
@@ -1385,7 +1406,7 @@ pub fn run() -> std::io::Result<()> {
                 }
                 Action::Scroll(delta) => {
                     if smoke {
-                        eprintln!("smoke: wheel={delta}, row={}", table.row_position());
+                        eprintln!("smoke: scroll={delta}, row={}", table.row_position());
                     }
                     browsing.pending = browsing.pending.saturating_add(delta as i64);
                     pending_jump = None;
