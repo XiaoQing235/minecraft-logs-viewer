@@ -92,7 +92,8 @@ impl SearchUi {
         let hits = Rc::new(RefCell::new(Vec::<Hit>::new()));
         let mut results = TableRow::default();
         results.set_frame(FrameType::NoBox);
-        results.set_table_frame(FrameType::FlatBox);
+        // Keep untouched cells visible during selection's partial redraw.
+        results.set_table_frame(FrameType::NoBox);
         results.set_color(theme::BACKGROUND);
         results.set_cols(3);
         results.set_col_width(0, 280);

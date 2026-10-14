@@ -118,7 +118,9 @@ pub fn build() -> (TableRow, Rc<RefCell<View>>) {
     // Fl_Table draws its outer frame after its child scrollbars. A filled box
     // paints over them; use a frame that does not fill the widget.
     table.set_frame(FrameType::NoBox);
-    table.set_table_frame(FrameType::FlatBox);
+    // Selection redraws only damaged rows. Filling the entire inner table here
+    // erases all untouched rows; each cell already paints its own background.
+    table.set_table_frame(FrameType::NoBox);
     table.set_cols(4);
     table.set_col_width(0, 55);
     table.set_col_width(1, 94);

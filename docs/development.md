@@ -46,6 +46,8 @@ minecraft-logs-viewer ./tests/fixtures --smoke --smoke-query ABCDEF --smoke-save
 
 Windows 使用 `./scripts/smoke-scroll.ps1` 进行实际输入验证。脚本仅向本次启动的测试进程发送 Win32 滚轮和鼠标消息，检查前后跨文件、gzip / 空文件、当前文件滚动条拖动，以及工作目录 / 程序目录为 `logs` 的自动识别。样本、截图与诊断输出位于被忽略的 `build/`；测试使用人工日志并跳过个人设置。
 
+Windows 的 `cargo test` 还运行表格局部重绘回归检查：在离屏 GDI 图像上绘制实际日志和搜索表格，再通过 `update_child` 保留选取产生的局部重绘标记，比较未选中行的像素。检查覆盖单行 / 多行选取、取消选取及缩放后的选取。普通 ImageSurface 截图会强制完整重绘，不能单独验证此类行消失问题。
+
 ## Git 记录
 
 开发在 `dev` 分支进行，每个可验证阶段单独提交。提交前执行对应检查和 `git diff --check`；个人日志、运行配置、构建缓存与测试生成物不进入提交。`origin` 指向上述 GitHub 仓库，提交推送到 `origin/dev`。
